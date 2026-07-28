@@ -4,6 +4,11 @@ Local control of Eufy string lights as a native Home Assistant light entity: pow
 
 > This is an unofficial community integration built by reverse-engineering the Eufy app's BLE traffic. It is not affiliated with or endorsed by Anker/Eufy. It was developed and tested against the Eufy Outdoor String Lights E10 (model T8L10). Other lights may work but are untested.
 
+### But first!
+
+![silly goobers](eufyCommunityScreenshot.png)
+
+And i took that personally.
 
 ## Requirements
 
