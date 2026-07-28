@@ -1,0 +1,19 @@
+{
+  "domain": "eufy_local",
+  "name": "Eufy Local Light",
+  "version": "3.0.0",
+  "config_flow": true,
+  "iot_class": "local_push",
+  "integration_type": "device",
+  "documentation": "https://github.com/sudosaturn/eufy-local-ha",
+  "issue_tracker": "https://github.com/sudosaturn/eufy-local-ha/issues",
+  "dependencies": ["bluetooth_adapters"],
+  "requirements": ["pycryptodome==3.23.0"],
+  "bluetooth": [
+    {
+      "local_name": "T8L10_*",
+      "connectable": true
+    }
+  ],
+  "codeowners": ["@sudosaturn"]
+}

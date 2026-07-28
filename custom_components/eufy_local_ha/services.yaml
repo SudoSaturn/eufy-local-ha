@@ -1,0 +1,13 @@
+set_brightness:
+  name: Set raw Eufy brightness
+  description: Send a direct 0-100 brightness command for protocol diagnostics.
+  fields:
+    brightness:
+      name: Brightness
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          mode: slider

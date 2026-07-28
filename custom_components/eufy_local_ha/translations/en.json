@@ -1,0 +1,38 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Eufy Local Light",
+        "description": "Enter the Bluetooth address and credentials. See the README for how to find your serial number and user ID.",
+        "data": {
+          "address": "Bluetooth MAC address",
+          "serial_number": "Device serial number (16 characters)",
+          "user_id": "Eufy account user ID"
+        }
+      }
+    },
+    "error": {
+      "invalid_serial": "The serial number must be exactly 16 characters.",
+      "invalid_user_id": "The user ID must be at least 16 characters."
+    },
+    "abort": {
+      "already_configured": "This light is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Color tuning",
+        "description": "Fine-tune how Home Assistant colors map to the strip. When setting up my lights i felt that the colors were always leaning twoards the lighters side. But im also colorblind so your milage may vary",
+        "data": {
+          "color_gamma": "Gamma (default 1.7)",
+          "color_saturation": "Saturation (1.0 = fully vivid)",
+          "achromatic_ratio": "Neutral threshold",
+          "white_balance_g": "White balance - green",
+          "white_balance_b": "White balance - blue"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "name": "Eufy Local Light",
+  "render_readme": true,
+  "homeassistant": "2024.6.0"
+}
