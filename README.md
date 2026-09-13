@@ -1,6 +1,6 @@
 # Eufy Local Light for Home Assistant
 
-Local control of Eufy string lights as a native Home Assistant light entity: power, brightness, and RGB over an encrypted Bluetooth Low Energy (BLE) session. No cloud, no Eufy app, no MQTT, no external daemon.
+Local control of Eufy string lights as a native Home Assistant light entity: power, brightness, and RGB over an encrypted Bluetooth Low Energy (BLE) session.
 
 > This is an unofficial community integration built by reverse-engineering the Eufy app's BLE traffic. It is not affiliated with or endorsed by Anker/Eufy. It was developed and tested against the Eufy Outdoor String Lights E10 (model T8L10). Other lights may work but are untested.
 
