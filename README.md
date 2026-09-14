@@ -60,7 +60,7 @@ you can tune these from Settings > Devices & services > Eufy Local Light > Confi
 | White balance, green | 0.85 | Lower if whites look green |
 | White balance, blue | 0.55 | Lower if whites look blue; raise if amber |
 
-# If you're having issues and disconnections make sure that you don't have the Eufy app connected! it allows one bluetooth connection at a time and you'd have to re-pair!.
+### If you're having issues and disconnections make sure that you don't have the Eufy app connected! it allows one bluetooth connection at a time and you'd have to re-pair!.
 
 
 If you're just here to get your lights working this probably won't be your cup of tea but feel free to see [PROTOCOL.md](PROTOCOL.md) for complete breakdown :)
