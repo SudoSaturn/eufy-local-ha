@@ -155,6 +155,44 @@ Captured preset frames are shipped in
 `tail` is everything after the `a1`/`a2` envelope; the integration prepends a
 fresh envelope and replays them.
 
+### Reading state back
+
+The light reports its own state over the notify characteristic, encrypted
+with the session key like any control frame (opcode has `0x4000` set; decrypt
+`raw[9:-1]`).
+
+- **`0x0204` state report** — pushed unprompted after every change, whoever
+  made it (also after a no-op write such as re-sending the current
+  brightness). The plaintext is bare TLVs, no status byte:
+
+  ```
+  a1 01 <power: 01 on, 00 off>
+  a2 01 <brightness 0..100>
+  a3 01 <segment count>            # 0x14 = 20 on the reference unit
+  a4 04 <effect id, u32 LE>        # 0x020D: the cloud id; 0x0206: its a3 id
+  a5 01 00                         # unknown
+  a6 04 <cloud id, u32 LE>         # the app preset's id; 0 for a plain colour
+  a7 01 <02 while on, 00 when off>
+  ```
+
+- **`0x0200` status query** — `base + a3 <n> <mask>`, where the mask selects
+  fields by bit: bit 0 power (`a1`), 1 brightness (`a2`), 2 segments (`a3`),
+  3 effect id (`a4`), 4 `a5`, 5 cloud id (`a6`), 6 a 16-byte `a7` (all zero
+  here), 7 `a8` (`02`). `a3 02 ff ff` asks for everything. The reply is
+  `0x0A00`: a status byte (`00` = ok) followed by the requested TLVs. Field
+  widths differ from the report — `a3` segments is 2 bytes and `a4` effect id
+  2 bytes here — so read numbers little-endian at whatever length is given.
+  `0x0200` with no `a3` mask answers just `04`.
+
+  ```
+  00 a1 01 01  a2 01 64  a3 02 14 00  a4 02 2d 00  a5 01 00
+     a6 04 3b 75 00 00  a7 10 00..00  a8 01 02  a9 01 00
+  ```
+
+The palette itself is not reported, so a colour set by `0x0206` can only be
+tracked optimistically. Each command is also acked with `0x0A01`/`0x0A06`/
+`0x0A0D` carrying a status byte.
+
 ### Device-specific values (example)
 
 | Field | Value |
