@@ -278,16 +278,25 @@ class EufyBLEController:
 
     async def _send_color(
         self,
-        color: tuple[int, int, int],
+        color: tuple[int, ...],
         base_payload: bytes,
     ) -> None:
-        red, green, blue = self._correct_color(color)
+        # The colour frame carries five channels: R, G, B, warm white, cool
+        # white (verified on the E22/T8L02). A 5-tuple (r, g, b, cold, warm)
+        # drives the dedicated white LEDs directly and skips the RGB-to-white
+        # approximation; a 3-tuple keeps the original RGB-only behaviour with
+        # both white channels off.
+        if len(color) == 5:
+            red, green, blue, cold_white, warm_white = color
+        else:
+            red, green, blue = self._correct_color(color)
+            warm_white = cold_white = 0
         bulbs = bytes([30]) + bytes(range(30))
         payload = (
             base_payload
             + bytes.fromhex("a302264e")
             + bytes.fromhex("a50105")
-            + bytes.fromhex("a60601") + bytes([red, green, blue, 0, 0])
+            + bytes.fromhex("a60601") + bytes([red, green, blue, warm_white, cold_white])
             + bytes([0xA7]) + bytes([len(bulbs)]) + bulbs
             + bytes.fromhex("a80164")
             + bytes.fromhex("a9050000000000")
@@ -305,12 +314,15 @@ class EufyBLEController:
         *,
         is_on: bool,
         brightness: int | None = None,
-        color: tuple[int, int, int] | None = None,
+        color: tuple[int, ...] | None = None,
     ) -> None:
         if brightness is not None and not 0 <= brightness <= 100:
             raise EufyBLEError("Brightness must be between 0 and 100")
-        if color is not None and any(not 0 <= channel <= 255 for channel in color):
-            raise EufyBLEError("RGB channels must be between 0 and 255")
+        if color is not None:
+            if len(color) not in (3, 5):
+                raise EufyBLEError("Color must have 3 (RGB) or 5 (RGBWW) channels")
+            if any(not 0 <= channel <= 255 for channel in color):
+                raise EufyBLEError("Color channels must be between 0 and 255")
 
         if color is not None:
             self.current_color = color

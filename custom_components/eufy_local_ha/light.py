@@ -6,6 +6,7 @@ import logging
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_RGB_COLOR,
+    ATTR_RGBWW_COLOR,
     ColorMode,
     LightEntity,
 )
@@ -22,6 +23,11 @@ from .const import CONF_SERIAL_NUMBER, DEVICE_MANUFACTURER, DOMAIN
 SCAN_INTERVAL = timedelta(seconds=30)
 _LOGGER = logging.getLogger(__name__)
 
+# Models with dedicated warm/cool white LEDs, driven as RGBWW (matched on the
+# serial-number prefix). Everything else keeps the original RGB mode and the
+# gamma/white-balance correction in EufyBLEController.
+RGBWW_SERIAL_PREFIXES = ("T8L02",)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -34,16 +40,24 @@ async def async_setup_entry(
 class EufyLocalLight(LightEntity):
     _attr_has_entity_name = True
     _attr_name = None
-    _attr_supported_color_modes = {ColorMode.RGB}
-    _attr_color_mode = ColorMode.RGB
     _attr_should_poll = True
     _attr_is_on = False
     _attr_brightness = 255
-    _attr_rgb_color = (255, 255, 255)
 
     def __init__(self, entry: ConfigEntry) -> None:
         self.controller: EufyBLEController = entry.runtime_data
         serial = entry.data[CONF_SERIAL_NUMBER]
+        # The E22 (T8L02) has dedicated warm- and cool-white LEDs, so it is an
+        # RGBWW light (rgbww_color is r, g, b, cold_white, warm_white). The E10
+        # and other models have no separate white LEDs and keep plain RGB.
+        if serial.upper().startswith(RGBWW_SERIAL_PREFIXES):
+            self._attr_supported_color_modes = {ColorMode.RGBWW}
+            self._attr_color_mode = ColorMode.RGBWW
+            self._attr_rgbww_color = (255, 255, 255, 0, 0)
+        else:
+            self._attr_supported_color_modes = {ColorMode.RGB}
+            self._attr_color_mode = ColorMode.RGB
+            self._attr_rgb_color = (255, 255, 255)
         self._attr_unique_id = f"eufy_local_{serial}"
         self._attr_available = False
         self._attr_device_info = DeviceInfo(
@@ -63,15 +77,21 @@ class EufyLocalLight(LightEntity):
 
     async def async_turn_on(self, **kwargs) -> None:
         brightness = kwargs.get(ATTR_BRIGHTNESS)
-        rgb = kwargs.get(ATTR_RGB_COLOR)
         brightness_percent = None
         color = None
 
         if brightness is not None:
             brightness = int(brightness)
             brightness_percent = round(brightness * 100 / 255)
-        if rgb is not None:
-            color = tuple(int(channel) for channel in rgb)
+        if self._attr_color_mode == ColorMode.RGBWW:
+            rgbww = kwargs.get(ATTR_RGBWW_COLOR)
+            if rgbww is not None:
+                # (r, g, b, cold_white, warm_white) -> the controller's 5 channels.
+                color = tuple(int(channel) for channel in rgbww)
+        else:
+            rgb = kwargs.get(ATTR_RGB_COLOR)
+            if rgb is not None:
+                color = tuple(int(channel) for channel in rgb)
 
         try:
             await self.controller.async_set_state(
@@ -88,7 +108,10 @@ class EufyLocalLight(LightEntity):
         if brightness is not None:
             self._attr_brightness = brightness
         if color is not None:
-            self._attr_rgb_color = color
+            if self._attr_color_mode == ColorMode.RGBWW:
+                self._attr_rgbww_color = color
+            else:
+                self._attr_rgb_color = color
 
     async def async_turn_off(self, **kwargs) -> None:
         try:
