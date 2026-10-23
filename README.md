@@ -1,8 +1,17 @@
 # Eufy Local Light for Home Assistant
 
-Local control of Eufy string lights as a native Home Assistant light entity: power, brightness, and RGB over an encrypted Bluetooth Low Energy (BLE) session.
+Local control of Eufy string lights as a native Home Assistant light entity: power, brightness, RGB, warm/cool white, and the app's own preset effects over an encrypted Bluetooth Low Energy (BLE) session.
 
-> This is an unofficial community integration built by reverse-engineering the Eufy app's BLE traffic. It is not affiliated with or endorsed by Anker/Eufy. It was developed and tested against the Eufy Outdoor String Lights E10 (model T8L10). Other lights may work but are untested.
+> This is an unofficial community integration built by reverse-engineering the Eufy app's BLE traffic. It is not affiliated with or endorsed by Anker/Eufy. It was developed and tested against the Eufy Outdoor String Lights E10 (model T8L10) and the Eufy Permanent Outdoor Lights E22 (model T8L02). Other lights may work but are untested.
+
+## E22 (Permanent Outdoor Lights, T8L02)
+
+The E22 is auto-discovered (it advertises as `T8L02_xxxx`) and set up through the same flow as the E10. Beyond power, brightness and colour, the E22 adds:
+
+- **Warm and cool white.** The light is exposed as an RGBWW entity, driving its dedicated white LEDs directly rather than approximating white from RGB.
+- **The app's preset effects.** Every pre-canned scene from the Eufy app's gallery (Holiday, Nature, Moods, Culture and the Daily white) appears in Home Assistant's effect list. These were captured off a real E22 and are replayed over Bluetooth; see [`PROTOCOL.md`](PROTOCOL.md) and [`custom_components/eufy_local_ha/effects.json`](custom_components/eufy_local_ha/effects.json).
+
+Not yet supported on the E22: per-segment "DIY" patterns (the frame exceeds one BLE write and would need fragmentation).
 
 ### But first!
 

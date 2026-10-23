@@ -117,3 +117,54 @@ The reference device used during reverse-engineering:
 | Firmware | 2.0.4.0 |
 | AES IV | serial number (16 ASCII chars) |
 | Initial AES key | `user_id[:16]` (16 ASCII chars) |
+
+## E22 (Permanent Outdoor Lights, T8L02) additions
+
+The E22 shares the GATT, framing, encryption and handshake above. It was
+reverse-engineered on firmware `2.0.4.0` by sniffing the Eufy app's cloud
+(MQTT) traffic — the command frames are identical over MQTT and BLE, so the
+captures replay over BLE unchanged. Differences from the E10 notes:
+
+### Colour is RGBWW, not RGB
+
+The `0x0206` colour frame's `a6` palette carries **five** channels per colour,
+not three: `R, G, B, warm-white, cool-white`. The last two drive dedicated
+white LEDs, so neutral/white does not have to be approximated from RGB.
+
+```
+a6 06 01 <R> <G> <B> <WarmWhite> <CoolWhite>
+```
+
+### Effects use two different opcodes
+
+- **Simple "dynamic" colour** uses `0x0206` with effect id `20000` (vs `20006`
+  for a static per-segment DIY pattern), an `a5` speed byte, the five-channel
+  `a6` palette, and the `a7` per-segment map. `b0 = 07`.
+- **The app's named presets** are sent differently depending on complexity:
+  - *Solid presets* (e.g. "Daily: Warm White") use `0x0206` with a low effect
+    id (e.g. `45`), the preset's cloud id in `ac`, no `a7`, and `b0 = 00`.
+  - *Animations* (all the Holiday/Nature/Moods/Culture scenes) use `0x020D`,
+    the multi-layer animation frame: `a3` cloud id (4B LE), `a4` speed (1B),
+    `a5` layer count, `a6` execution mode, `a8` mode flag, then one `a9+i`
+    layer blob per layer. The E22 renders these directly and acks with
+    `0x0A0D`; unlike the floor-lamp family it needs **no** `0x0200` handshake
+    first.
+
+Captured preset frames are shipped in
+`custom_components/eufy_local_ha/effects.json` as `{opcode, tail}`, where
+`tail` is everything after the `a1`/`a2` envelope; the integration prepends a
+fresh envelope and replays them.
+
+### Device-specific values (example)
+
+| Field | Value |
+| --- | --- |
+| Model | T8L02 (Permanent Outdoor Lights E22) |
+| Firmware | 2.0.4.0 |
+| Segments | 20 (reported in the `0x0204` state frame) |
+| AES IV | serial number (16 ASCII chars) |
+| Initial AES key | `user_id[:16]` (16 ASCII chars) |
+
+Note: the controller accepts an all-zero user id during the handshake, so
+control does not strictly require a real Eufy account id — which also means
+anyone in BLE range can control the lights.
