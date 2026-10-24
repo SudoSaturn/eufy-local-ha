@@ -11,7 +11,7 @@ The E22 is auto-discovered (it advertises as `T8L02_xxxx`) and set up through th
 - **Warm and cool white.** The light is exposed as an RGBWW entity, driving its dedicated white LEDs directly rather than approximating white from RGB.
 - **The app's preset effects.** Every pre-canned scene from the Eufy app's gallery (Holiday, Nature, Moods, Culture and the Daily white) appears in Home Assistant's effect list. These were captured off a real E22 and are replayed over Bluetooth; see [`PROTOCOL.md`](PROTOCOL.md) and [`custom_components/eufy_local_ha/effects.json`](custom_components/eufy_local_ha/effects.json).
 
-Not yet supported on the E22: per-segment "DIY" patterns (the frame exceeds one BLE write and would need fragmentation).
+Not yet supported on the E22: per-segment "DIY" patterns. The frame format is now known (see [`PROTOCOL.md`](PROTOCOL.md)) and fits in a single Bluetooth write, but the integration doesn't expose it yet.
 
 ### State readback
 
