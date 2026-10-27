@@ -45,6 +45,10 @@ If you still neeed to use the official Eufy phone app alongside Home Assistant:
 ### 3. Manual Entry
 Mostly as a fallback if for some reason options 1 and 2 dont work. you'll need yo type in your 16-character serial number, and Eufy User ID.
 
+## Entities
+
+Besides the light itself, each light's device reports a **Lights** sensor: how many lights the controller detected. The controller counts them each time it powers up.
+
 ## Options: color tuning
 
 Raw sRGB doesnt seem to look right to me on these LEDs so i adjusted the saturation to to stops light colors from washing out to white (kinda).

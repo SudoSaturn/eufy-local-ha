@@ -71,5 +71,12 @@
         }
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "light_count": {
+        "name": "Lights"
+      }
+    }
   }
 }
