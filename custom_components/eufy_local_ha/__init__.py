@@ -5,6 +5,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.helpers.device_registry import DeviceEntry
 
 from .ble import EufyBLEController
 from .const import (
@@ -83,3 +84,17 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unloaded:
         await entry.runtime_data.async_disconnect()
     return unloaded
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, entry: ConfigEntry, device: DeviceEntry
+) -> bool:
+    """Let the light be deleted from its device page.
+
+    Each entry holds exactly one light, so deleting its device deletes the
+    entry too, rather than leaving an entry that would recreate the device on
+    its next reload. Any other (stale) device is simply allowed to go.
+    """
+    if (DOMAIN, entry.data[CONF_SERIAL_NUMBER]) in device.identifiers:
+        hass.async_create_task(hass.config_entries.async_remove(entry.entry_id))
+    return True
