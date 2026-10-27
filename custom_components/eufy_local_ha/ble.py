@@ -63,6 +63,9 @@ class EufyState:
     # The eufy app's id for the preset or scene that is running; 0 for a
     # colour set outside the app's preset list.
     cloud_id: int | None = None
+    # Whether the controller plays its rainbow sweep when the lights are
+    # switched on and off. Only the 0x0A00 status reply carries it.
+    power_effect: bool | None = None
 
 
 def _tlvs(body: bytes) -> dict[int, bytes]:
@@ -113,9 +116,10 @@ def _parse_state(body: bytes, previous: EufyState) -> EufyState:
     always the same widths (a3/a4 are 1 and 4 bytes in the report, 2 and 2 in
     the reply), so numbers are read little-endian at whatever length is given.
     """
+    tlvs = _tlvs(body)
     fields = {
         tag: int.from_bytes(value, "little") if len(value) <= 4 else 0
-        for tag, value in _tlvs(body).items()
+        for tag, value in tlvs.items()
     }
     state = previous
     if 0xA1 in fields:
@@ -128,6 +132,10 @@ def _parse_state(body: bytes, previous: EufyState) -> EufyState:
         state = replace(state, effect_id=fields[0xA4])
     if 0xA6 in fields:
         state = replace(state, cloud_id=fields[0xA6])
+    # In the status reply a9 is one byte (00 = power on/off effect on, 01 =
+    # off); a pushed 0x0204 report can carry an unrelated 12-byte a9.
+    if len(tlvs.get(0xA9, b"")) == 1:
+        state = replace(state, power_effect=tlvs[0xA9] == b"\x00")
     return state
 
 
@@ -508,6 +516,33 @@ class EufyBLEController:
         if isinstance(mtu, int):
             return min(FRAGMENT_LEN, mtu - ATT_HEADER_LEN)
         return FRAGMENT_LEN
+
+    async def async_set_power_effect(self, enabled: bool) -> EufyState:
+        """Turn the rainbow sweep the controller plays on power on/off on or off.
+
+        It is a controller setting on 0x0201 (a7: 00 on, 01 off); the light
+        pushes no report for it, so read it back with a status query.
+        """
+        async with self.command_lock:
+            for attempt in range(2):
+                try:
+                    await self.async_ensure_connected()
+                    payload = self._base_payload() + bytes.fromhex("a701") + (
+                        bytes([0x00]) if enabled else bytes([0x01])
+                    )
+                    await self._write(
+                        self._packet(0x0201, payload, encrypted=True, type_value=2)
+                    )
+                    break
+                except EufyBLEError:
+                    await self.async_disconnect()
+                    if attempt == 1:
+                        raise
+                except Exception as exc:
+                    await self.async_disconnect()
+                    if attempt == 1:
+                        raise EufyBLEError(str(exc)) from exc
+        return await self.async_request_status()
 
     async def _send_power(self, is_on: bool, base_payload: bytes) -> None:
         payload = base_payload + bytes.fromhex("a301") + (
