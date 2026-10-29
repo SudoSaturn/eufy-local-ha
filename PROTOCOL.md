@@ -117,3 +117,276 @@ The reference device used during reverse-engineering:
 | Firmware | 2.0.4.0 |
 | AES IV | serial number (16 ASCII chars) |
 | Initial AES key | `user_id[:16]` (16 ASCII chars) |
+
+## E22 (Permanent Outdoor Lights, T8L02) additions
+
+The E22 shares the GATT, framing, encryption and handshake above. It was
+reverse-engineered on firmware `2.0.4.0` by sniffing the Eufy app's cloud
+(MQTT) traffic — the command frames are identical over MQTT and BLE, so the
+captures replay over BLE unchanged. Differences from the E10 notes:
+
+### Colour is RGBWW, not RGB
+
+The `0x0206` colour frame's `a6` palette carries **five** channels per colour,
+not three: `R, G, B, warm-white, cool-white`. The last two drive dedicated
+white LEDs, so neutral/white does not have to be approximated from RGB.
+
+```
+a6 06 01 <R> <G> <B> <WarmWhite> <CoolWhite>
+```
+
+### Effects use two different opcodes
+
+- **Simple "dynamic" colour** uses `0x0206` with effect id `20000` (vs `20006`
+  for a static per-segment DIY pattern), an `a5` speed byte, the five-channel
+  `a6` palette, and the `a7` per-segment map. `b0 = 07`.
+- **The app's named presets** are sent differently depending on complexity:
+  - *Solid presets* (e.g. "Daily: Warm White") use `0x0206` with a low effect
+    id (e.g. `45`), the preset's cloud id in `ac`, no `a7`, and `b0 = 00`.
+  - *Animations* (all the Holiday/Nature/Moods/Culture scenes) use `0x020D`,
+    the multi-layer animation frame: `a3` cloud id (4B LE), `a4` speed (1B),
+    `a5` layer count, `a6` execution mode, `a8` mode flag, then one `a9+i`
+    layer blob per layer. The E22 renders these directly and acks with
+    `0x0A0D`; unlike the floor-lamp family it needs **no** `0x0200` handshake
+    first.
+
+Captured preset frames are shipped in
+`custom_components/eufy_local_ha/effects.json` as `{opcode, tail}`, where
+`tail` is everything after the `a1`/`a2` envelope; the integration prepends a
+fresh envelope and replays them.
+
+### Solid-colour frame fields on the E22
+
+Tested by replaying variations of the `0x0206` solid-colour frame above:
+
+- **`a7` is the list of segments to colour**, after a count byte (one such
+  group per colour; see below). The E22
+  has **20 segments** (its state report gives `a3` = `14`); the 30-entry map
+  the integration sends colours all of them and entries past 19 are ignored.
+  A map of `0`–`9` coloured only the half nearest the controller, and
+  `0, 2, 4 …` every other light.
+- **`a3` (u16 LE) picks a built-in effect** for the colour layout. Tested
+  on a layout of red on one half and blue on the other:
+
+  | Effect id | Effect |
+  | --- | --- |
+  | `20000` (`20 4e`) | chase, from the controller end outward |
+  | `20001` (`21 4e`) | chase, the other way |
+  | `20002` (`22 4e`) | the colours swap places back and forth |
+  | `20003` (`23 4e`) | each part fades between the colours |
+  | `20004` (`24 4e`) | flash on and off |
+  | `20005` (`25 4e`) | breathe, all in sync |
+  | `20006` (`26 4e`) | static (what the integration sends) |
+
+- **`a5` is the speed** of the effect: `01` slow, `05` (what the
+  integration sends) medium, `0a` fast. `0f` and `14` were rejected, so the
+  maximum is somewhere from `0a` to `0e`.
+- **`b0`** accepts `00`, `06` and `07` and rejects `01`, `03` and `05`. None
+  of the accepted values visibly changed a moving two-colour layout; `07` is
+  the value that keeps a solid colour from washing out (see above).
+- A rejected `0x0206` is acked (`0x0A06`) with a first byte of `01`, like
+  `0x020D`, and the previous scene keeps running.
+- **Several colours: one group per colour.** `a6` is a colour count followed
+  by that many 5-byte colours, and `a7` holds one group per colour, in the
+  same order: a segment count, then that many segment numbers. For example
+  red on the half nearest the controller and blue on the other half:
+
+  ```
+  a6 0b 02  ff 00 00 00 00  00 00 ff 00 00
+  a7 16 0a 00 01 02 03 04 05 06 07 08 09  0a 0a 0b 0c 0d 0e 0f 10 11 12 13
+  ```
+
+  Every colour needs its group. When `a7` ran out early the light kept
+  reading groups from the bytes after it (the `a8 01 64 a9 05 …` that
+  follow), painting whichever of those bytes were valid segment numbers —
+  which is how a two-colour palette with a one-group map lit segments 0, 1,
+  4, 5 and 7 in the second colour.
+- The state report's `a7` reads `03` while a solid colour is showing (`02`
+  for an animation, `00` when off).
+
+### What a preset animation frame contains
+
+A `0x020D` preset is a complete description of the animation, not a
+reference to one stored in the light. The cloud id in `a3` is only a label:
+the light echoes it back in its state report but doesn't use it to draw.
+Confirmed on an E22 by replaying "Culture: Spain" (a red/orange-yellow chase)
+with only its palette changed — the same chase played in the new colours —
+and with a made-up cloud id, which looked identical to the original.
+
+The frame-level fields set by the preset:
+
+- `a4` is the **scene speed** (higher is faster: `08` slow, `28` Spain's,
+  `60` fast).
+- `a5` is the layer count.
+- `a6` sets **how the layers enter**: `00` all start together; `01` and `02`
+  the layer behind joins about a second after the front one; `03` it fades
+  in. (Tested with a chase in front of a fill.)
+- `a8` is `00` in every preset, and `01` was rejected by the light.
+
+A rejected `0x020D` is acked with a first byte of `01`, and the previous
+scene keeps running. The last byte of the ack differed between the two
+rejections seen (`01 a1 01 01` and `01 a1 01 02`), so it may say what was
+wrong.
+
+The meanings below come from replaying single-byte changes on a real E22
+and watching the strip — first on Spain's layer, then on one layer with a
+single colour (red), which makes the cell structure easy to see. "Not
+mapped" bytes were not changed or showed no visible effect.
+
+Each `a9+i` layer blob:
+
+| Offset | Meaning |
+| --- | --- |
+| 0 | **depth**: lower is in front (see *How layers combine*) |
+| 1 | **layer speed**, higher is faster (`05` slow, `18` Spain's, `60` very fast) |
+| 2 | end of the layer's stretch of strip, % (0–100) |
+| 3 | start of the layer's stretch of strip, % |
+| 4 | not mapped (usually `01`; `02` made no visible change) |
+| 5 | **scale**: each light of the pattern becomes a group of this many (`03` turned "1 on, 2 off" into "3 on, 6 off"); `01` in almost every preset |
+| 6–7 | **how the scene starts.** `00 80`, `01 80` and `00 8b` go straight into the animation; `00 82`, `00 00`, `00 81`, `00 0d`, `01 0d`, `00 83`, `00 85`, `00 86` and `00 01` first play a few seconds of fast rainbow (some also flash a rainbow when switched off). None changes the animation itself |
+| 8 | not mapped; `03` lit only part of the strip, `01` made no visible change |
+| 9 | **parameter-block format**: `00` → 17 bytes, `01` → 10 bytes, `02` → 12 bytes (holds for all 193 captured layers) |
+| 10 | colour count `N` |
+| 11.. | `N` × 5-byte colours: `R G B WarmWhite CoolWhite` |
+| then | the parameter block |
+
+Parameter block, format `00` (17 bytes, `p0`–`p16`; Spain's is
+`00 00 03 00 00 00 00 03 00 00 00 00 00 64 00 00 01`):
+
+| Byte | Meaning |
+| --- | --- |
+| p0, p1 | **fading**: p0 = `01` with a non-zero p1 makes each step fade on and off instead of switching; p1 = `ff` and `be` looked about the same. The presets pair p0 = `00` with p1 = `00` |
+| p2 | **where the motion starts**: `00` from the left (controller end), `01` from the right, `02` from both ends inward, `03` from the centre outward; higher values fall back to `00` |
+| p7 | **cell length** in lights: each palette entry fills one cell, and the palette repeats along the strip |
+| p12 | **how a cell is lit**: `00`/`01` all on, `03` one third on (with a 3-light cell: 1 on, 2 off), `04` head plus a dim tail (1 on, 1 dim, 1 off) |
+| p5 | no visible change (`00`→`01`) |
+| p10 | **repeat**: `00` repeats the cell pattern along the strip; `ff` sends a single light along the whole strip |
+| p13 | `64` in 111 of 114 layers; `2d` made no obvious difference, so probably not brightness |
+| p14 | **brightness of the unlit part of a cell** (`11` turned "1 on, 2 off" into "1 on, 2 dim") |
+| p15, p16 | no visible change (`p15` `00`→`01`, `p16` `01`→`02`) |
+| others | not mapped |
+
+Parameter block, format `02` (12 bytes): a **breathing** effect. Swept on
+one layer with a single colour from the baseline
+`03 64 0f 01 00 00 00 ff 00 00 00 01`, which breathes the whole strip
+bright and dim:
+
+| Byte | Meaning |
+| --- | --- |
+| p0 | **waveform**: `03` smooth breathing (`01` looked about the same), `04` a quick rise then a slow fade |
+| p1 | `64` in 61 of 62 layers; not tested |
+| p2 | **how dim it gets** (likely a %): `0f` and `32` both breathe, `64` stays static at full brightness |
+| p3 | `02` (from `01`) widened the brightness range; not mapped further |
+| p4 | `01` (from `00`) made the fade slightly more abrupt; not mapped further |
+| p5 | **spacing**: number of dark lights between lit ones (`00` none … `04` four) |
+| p6 | `02` was **rejected** — the `0x0A0D` ack carried status `01` and the light kept its previous scene |
+| p7 | **how many lights breathe at once**: `ff` all together; `01` one light at a time, travelling along an otherwise dim strip |
+| p9, p10–p11 | no visible change (`p9` `00`→`02`; `p10 p11` `00 01`→`01 00`) |
+| others | not mapped |
+
+Parameter block, format `01` (10 bytes): a **fill**, the usual background
+layer of multi-layer scenes. Swept on one layer with the baseline
+`64 00 00 00 00 00 00 00 00 01`; with a single colour it is a static solid
+fill, so the bytes below were mapped with a two-colour palette (red, blue):
+
+| Byte | Meaning |
+| --- | --- |
+| p0 | `64` in most layers; `32` made no visible change |
+| p1 | **layout**: `00` the palette colours alternate light by light; `01` a static gradient from the first colour (controller end) to the last |
+| p2 | no visible change (`01`, `02`) |
+| p3 | **animation**: `00` static; `01` the colours swap places back and forth; `02` each light cross-fades between the colours, alternate lights out of step |
+| p4, p8–p9 | no visible change (`p4` `00`→`01`; `p8 p9` `00 01`→`01 00`) |
+| p7 | `01` lays the colours out in irregular, random-length runs |
+| others | not mapped |
+
+The red-to-blue gradient (p1 = `01`) ran through the hues in between
+(yellow, green); combined with the cross-fade (p3 = `02`) it showed purple
+in the middle instead. Why is not known.
+
+#### How layers combine
+
+Tested with a blue fill layer and a red chase layer (1 on, 2 off):
+
+- **Layer byte 0 is depth; lower is in front.** Wherever a front layer
+  lights a light, layers behind it don't show there: a red chase at `00`
+  over a blue fill at `01` (or `01` over `02`) shows pure red over blue, and
+  a chase behind a full-strip fill is hidden entirely.
+- **Layers at the same depth add their colours**: the same red chase over the
+  blue fill, both at `00`, shows pink over blue.
+- **Layers behind keep running.** A full-strip chase behind a half-strip fill
+  shows only on the uncovered half, still moving along as before.
+- The order of the `a9+i` blobs in the frame makes no difference, and each
+  layer stays within its own start–end range.
+
+Many animations — those with an intro, a delayed layer (`a6` ≠ `00`) and
+some cell styles — make the light send a second, identical `0x0204` report
+about 1.7 s after the `0x0A0D` ack. What exactly triggers it is not known.
+
+For example Spain's single layer is
+
+```
+00 18 64 00 01 01 00 80 00 00 03  ff 00 00 00 00  ff 7d 00 00 00  ff 00 00 00 00
+00 00 03 00 00 00 00 03 00 00 00 00 00 64 00 00 01
+```
+
+— the whole strip (0–100 %), `00 80` in bytes 6–7, and three colours: red,
+orange-yellow, red. With a 3-light cell (p7) it shows 6 red and 3 yellow
+per set (the two reds join); with p2 = `03` it starts from the centre. Many scenes share a template and differ only in palette
+(e.g. "Christmas Day 3", "Misty Rain" and "Candy Land" are the same
+four-layer layout over 0–25/25–50/50–75/75–100 %).
+
+### Reading state back
+
+The light reports its own state over the notify characteristic, encrypted
+with the session key like any control frame (opcode has `0x4000` set; decrypt
+`raw[9:-1]`).
+
+- **`0x0204` state report** — pushed unprompted after every change, whoever
+  made it (also after a no-op write such as re-sending the current
+  brightness). The plaintext is bare TLVs, no status byte:
+
+  ```
+  a1 01 <power: 01 on, 00 off>
+  a2 01 <brightness 0..100>
+  a3 01 <segment count>            # 0x14 = 20 on the reference unit
+  a4 04 <effect id, u32 LE>        # 0x020D: the cloud id; 0x0206: its a3 id
+  a5 01 00                         # unknown
+  a6 04 <cloud id, u32 LE>         # the app preset's id; 0 for a plain colour
+  a7 01 <02 while on, 00 when off>
+  ```
+
+- **`0x0200` status query** — `base + a3 <n> <mask>`, where the mask selects
+  fields by bit: bit 0 power (`a1`), 1 brightness (`a2`), 2 segments (`a3`),
+  3 effect id (`a4`), 4 `a5`, 5 cloud id (`a6`), 6 a 16-byte `a7` (all zero
+  here), 7 `a8` (`02`). `a3 02 ff ff` asks for everything. The reply is
+  `0x0A00`: a status byte (`00` = ok) followed by the requested TLVs. Field
+  widths differ from the report — `a3` segments is 2 bytes and `a4` effect id
+  2 bytes here — so read numbers little-endian at whatever length is given.
+  `0x0200` with no `a3` mask answers just `04`.
+
+  ```
+  00 a1 01 01  a2 01 64  a3 02 14 00  a4 02 2d 00  a5 01 00
+     a6 04 3b 75 00 00  a7 10 00..00  a8 01 02  a9 01 00
+  ```
+
+After a `0x020D` animation the report can also carry an `a9` field
+(12 bytes: `02 00 00 00`, the cloud id as u32 LE, then a u32 that changes
+between reports); its meaning is unknown.
+
+The palette itself is not reported, so a colour set by `0x0206` can only be
+tracked optimistically. Each command is also acked with `0x0A01`/`0x0A06`/
+`0x0A0D` carrying a status byte.
+
+### Device-specific values (example)
+
+| Field | Value |
+| --- | --- |
+| Model | T8L02 (Permanent Outdoor Lights E22) |
+| Firmware | 2.0.4.0 |
+| Segments | 20 (reported in the `0x0204` state frame) |
+| AES IV | serial number (16 ASCII chars) |
+| Initial AES key | `user_id[:16]` (16 ASCII chars) |
+
+Note: the controller accepts an all-zero user id during the handshake, so
+control does not strictly require a real Eufy account id — which also means
+anyone in BLE range can control the lights.

@@ -11,6 +11,10 @@
   "requirements": ["pycryptodome==3.23.0"],
   "bluetooth": [
     {
+      "local_name": "T8L02_*",
+      "connectable": true
+    },
+    {
       "local_name": "T8L10_*",
       "connectable": true
     }
