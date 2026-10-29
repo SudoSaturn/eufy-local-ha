@@ -39,7 +39,7 @@ Add the integration via Settings > Devices & services > Add integration > Eufy L
 
 ### Finding your User ID
 
-- Read it from the Eufy Security account API (for example via the community [`eufy-security-ws`](https://github.com/bropat/eufy-security-ws) project), or
+- Read it from the Eufy Security account API (for example via the community [`eufy-sdk`](https://github.com/mega-yfue/eufy-sdk) project), or
 - Capture the app's HTTPS or BLE handshake traffic once and read the `user_id` field.
 
 To learn more about how i reversed it and where these are used you can read [PROTOCOL.md](PROTOCOL.md).
