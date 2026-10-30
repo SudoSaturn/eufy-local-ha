@@ -399,6 +399,76 @@ too.
 `0x0201` acks unknown tags with status `00` and ignores them, so trying
 tags there won't tell you which ones are real.
 
+### Blockout — `0x0201` `a6`
+
+The eufy app's "blockout" holds chosen lights permanently off, whatever
+scene or colour is showing. It is another controller setting on `0x0201`:
+
+```
+base + a6 03 <mask: u24 LE>
+```
+
+Bit *n* holds light *n* + 1 off, counting from the controller end; `00 00
+00` clears it. Worked out from a capture of the app blocking out each group
+of four lights along a 20-light string in turn:
+
+| Lights held off | `a6` |
+| --- | --- |
+| 1–4 | `0f 00 00` |
+| 5–8 | `f0 00 00` |
+| 9–12 | `00 0f 00` |
+| 13–16 | `00 f0 00` |
+| 17–20 | `00 00 0f` |
+| 1, 3, 5, 7, 9 | `55 01 00` |
+| 11, 13, 15, 17, 19 | `00 54 05` |
+
+The light acks each with `0x0A01`, status `00`, and reports the mask back
+as `a7` in the `0x0A00` status reply: 16 bytes, little-endian, with the same
+bit order (`a7 10 0f 00 …` with lights 1–4 held off, `a7 10 00 01 08 00 …`
+with lights 9 and 20). The pushed `0x0204` report does not carry it; its
+one-byte `a7` is unrelated. A 16-byte mask has room for 128 lights, so the
+3-byte `a6` may grow on longer strings; only a 20-light E22 has been tried.
+
+Confirmed on an E22 by watching the string: `0f 00 00` darkened the four
+lights nearest the controller, and `00 01 08` lights 9 and 20. The
+controller accepts and reports the mask even with no string plugged in.
+
+### Schedules — `0x0207` / `0x0208`
+
+The controller runs scene schedules itself. Adding one in the app (the
+Halloween scene, default start and stop times) sent the scene's `0x020D`
+frame and then `0x0207`; removing it sent `0x0208`. Both ack with status
+`00` (`0x0A07`, `0x0A08`). Fields as captured, with a tentative reading:
+
+```
+0x0207: base + a3 02 f3 ff         id (0x0208 removes by it)
+             + a4 01 01            enabled?
+             + a5 02 0a 1d         start date: month, day (29 Oct)
+             + a6 02 0a 1d         end date: month, day
+             + a8 02 12 00         start time: hour, minute (18:00)
+             + a9 02 06 00         stop time: hour, minute (06:00)
+             + aa 04 04 29 00 00   scene cloud id (10500)
+             + b3 04 00 00 00 00   unknown
+             + b4 04 00 00 00 00   unknown
+             + b5 01 00            unknown
+             + b6 01 50            brightness (80%)
+
+0x0208: base + a3 02 f3 ff         id
+```
+
+Added at 20:03, inside its 18:00–06:00 window, the schedule started the
+scene at once (the status reply showed it on at 80%, with cloud id 10500
+in `a6`), and removing it turned the lights off. So the controller must keep
+its own clock; nothing seen over Bluetooth sets it.
+
+The scene's cloud id (10500) is not the one the Halloween preset carries
+when played directly (10475, see `effects.json`), although the app sent
+the same scene's frames just before; the scheduler may use its own copy.
+
+Not seen over Bluetooth at all: the app's device information page, its
+installation-space settings and its firmware check, which presumably go
+over the cloud.
+
 The palette itself is not reported, so a colour set by `0x0206` can only be
 tracked optimistically. Each command is also acked with `0x0A01`/`0x0A06`/
 `0x0A0D` carrying a status byte.
