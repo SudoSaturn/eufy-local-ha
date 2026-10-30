@@ -403,6 +403,113 @@ The palette itself is not reported, so a colour set by `0x0206` can only be
 tracked optimistically. Each command is also acked with `0x0A01`/`0x0A06`/
 `0x0A0D` carrying a status byte.
 
+### Wi-Fi network — `0x0032`
+
+The eufy app sets the controller's Wi-Fi network over Bluetooth, after the
+usual handshake. Captured from the app on an iPhone (Apple's Bluetooth
+logging profile, then a sysdiagnose's `bluetoothd-hci-*.pklg`), changing the
+network to a WPA2 one:
+
+```
+type 2, encrypted with the session key
+base + a3 <n> <SSID>
+     + a4 01 00
+     + a5 01 00
+     + a6 <n> <password>
+```
+
+The SSID and password are plain bytes, not padded or terminated. `a4` and
+`a5` were both `00`; they are probably the security type and a hidden-network
+flag, but a capture of another kind of network would be needed to tell.
+
+The light answers with `0x0832` carrying a status byte, `00` when it accepts
+the network. The reply comes 7 to 11 seconds after the write, not
+immediately (measured on an E22: about 7 s re-sending the network it was
+on, about 11 s moving it to a different one).
+What a non-zero status means is not yet known.
+
+While its Wi-Fi screen is open the app also sends `0x0026` with no fields
+(type 1, encrypted) every 10 seconds, which the light acks with `0x0826`,
+status `00`: a keepalive.
+
+The app's `0x0022` key request carries `a3 04 00 00 00 00` rather than
+`e0 e3 ff ff`; the light hands out a session key either way.
+
+**This exposes the Wi-Fi password to anyone listening.** The initial key is
+the first 16 characters of the user id, which the handshake sends in clear
+text in `a2`, and the session key comes back encrypted under it. Anyone who
+records a setup can decrypt the password from the recording.
+
+### Split frames
+
+A command too long for one write is sent as several frames that share one
+sequence number. Each has `0x8000` set in its opcode (so an encrypted
+`0x0033` goes out as `0xC033`) and starts its payload with one byte, the
+fragment's number in the high nibble and the total in the low one (`0x12`,
+then `0x22`). The rest of each payload is a slice of the one AES-CBC
+ciphertext: join the slices, then decrypt. The app cut after 129
+ciphertext bytes, giving a 140-byte first frame.
+
+### Onboarding — first setup of a new light
+
+Captured from the app adding a factory-new E22 to an account. After the
+usual handshake (`0x0001`, `0x0029`, `0x0003`, `0x0005`, `0x0022`; the new
+light took the account's user id like any other), the app sent:
+
+| Opcode | Payload after `base` | Reply | What it seems to be |
+| --- | --- | --- | --- |
+| `0x0023` (type 1, encrypted) | `a3 10 <serial>` | `0x0823`, `00` | Confirm which light this is |
+| `0x0300` (type 2, encrypted) | none | `0x0B00`, `00`, then `a1` 32 hex chars, `a2` 32 hex chars, `a3` 10 digits | Identity values for registering the light with the cloud |
+| `0x0030` (type 1, encrypted) | none | `0x0830`, `00` | Start setup |
+| `0x020A` (type 2, encrypted) | `a3 <POSIX TZ>` `a4 <IANA zone>` | `0x0A0A`, `00` | Time zone, e.g. `GMT0BST,M3.5.0/1,M10.5.0` and `Europe/London` |
+| `0x0032` | see above | `0x0832`, `00` after ~7 s | Wi-Fi network |
+| `0x0033` (type 2, encrypted, split) | see below | `0x0833`, `00`, `a1 04 00 00 00 00` after ~11 s | Cloud registration |
+
+`0x0300`'s values differ per light and look like secrets, so they are not
+reproduced here.
+
+`0x0033` carries:
+
+```
+a3 <API base URL>      https://aiot-light-api-eu.eufylife.com
+a4 <POSIX TZ>          GMT0BST,M3.5.0/1,M10.5.0
+a5 <country>           GB
+a6 <app>               eufy_life
+a7 <model>             T8L02
+a8 <IANA zone>         Europe/London
+aa <device name>       the light's name in the app
+```
+
+No MQTT broker, certificate or account token is sent over Bluetooth, so the
+light must get those from the API at `a3`.
+
+### Repair — re-joining Wi-Fi and the cloud
+
+When an already-registered light is offline, the app (with Bluetooth on)
+says its Wi-Fi is not configured. That judgement comes from the cloud: no
+Bluetooth query for it was seen. Its fix is the tail of onboarding: `0x0032`
+with the network, then `0x0033` with the same fields as above (including the
+light's name), sent 37 ms after the light's `0x0832`. The light answered
+`0x0833` 11 seconds later and was back online.
+
+The order matters. Sending `0x0033` first and `0x0032` after left the light
+offline, and no `0x0833` ever came; the reply seems to arrive only once the
+light has reached the API.
+
+### Pointing the light at another API
+
+The light acts on `0x0033` at once. Sent with `a3` set to
+`https://<a LAN address>`, it opened a TLS connection to that address within
+a second, nine times about 2.5 s apart, then gave up. Each time it finished
+the TLS handshake with a self-signed certificate and then closed the
+connection without sending a request, so it seems to check the server
+certificate after the handshake. With an `http://` address it made no
+connection at all. Neither attempt returned a `0x0833`, and restoring the
+eufy URL took the repair sequence above.
+
+Whether it would accept a certificate from a public CA for a hostname
+under one's own control (rather than only eufy's) is untested.
+
 ### Device-specific values (example)
 
 | Field | Value |
