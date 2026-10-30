@@ -12,12 +12,12 @@ from homeassistant.components.light import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .ble import EufyBLEController, EufyBLEError
+from .ble import EufyBLEController, EufyBLEError, EufyState
 from .const import CONF_SERIAL_NUMBER, DEVICE_MANUFACTURER, DOMAIN
 
 SCAN_INTERVAL = timedelta(seconds=30)
@@ -40,6 +40,7 @@ async def async_setup_entry(
 class EufyLocalLight(LightEntity):
     _attr_has_entity_name = True
     _attr_name = None
+    _attr_icon = "mdi:string-lights"
     _attr_should_poll = True
     _attr_is_on = False
     _attr_brightness = 255
@@ -69,11 +70,29 @@ class EufyLocalLight(LightEntity):
             sw_version="Local encrypted BLE",
         )
 
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(self.controller.async_subscribe(self._handle_report))
+
+    @callback
+    def _handle_report(self, state: EufyState) -> None:
+        self._apply_state(state)
+        self.async_write_ha_state()
+
+    def _apply_state(self, state: EufyState) -> None:
+        # Power and brightness are read back from the light.
+        # Colour stays optimistic: the light doesn't report a usable palette.
+        self._attr_available = True
+        if state.is_on is not None:
+            self._attr_is_on = state.is_on
+        if state.brightness is not None:
+            self._attr_brightness = round(state.brightness * 255 / 100)
+
     async def async_update(self) -> None:
-        self._attr_available = (
-            self.controller.connected
-            or await self.controller.async_device_visible()
-        )
+        try:
+            self._apply_state(await self.controller.async_request_status())
+        except EufyBLEError as exc:
+            _LOGGER.debug("Could not read the light's state: %s", exc)
+            self._attr_available = await self.controller.async_device_visible()
 
     async def async_turn_on(self, **kwargs) -> None:
         brightness = kwargs.get(ATTR_BRIGHTNESS)
