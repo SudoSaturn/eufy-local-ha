@@ -615,6 +615,56 @@ class EufyBLEController:
             self._packet(0x0206, payload, encrypted=True, type_value=2)
         )
 
+    async def _send_preset(
+        self, opcode: int, tail: bytes, base_payload: bytes
+    ) -> None:
+        # Replay a captured eufy-app preset: the stored tail is everything after
+        # the a1/a2 envelope (a3...b0), so prepend a fresh envelope and frame it
+        # with the preset's own opcode (0x0206 for solids, 0x020D for animations).
+        await self._write_packets(
+            self._packets(
+                opcode,
+                base_payload + tail,
+                encrypted=True,
+                type_value=2,
+                max_len=self._max_write_len(),
+            )
+        )
+
+    async def async_set_preset(
+        self, opcode: int, tail: bytes, brightness: int | None = None
+    ) -> None:
+        # Refuse a preset the light would ignore without an ack before
+        # touching the link, and one too big for it once its MTU is known.
+        size = len(self._pad(self._base_payload() + tail))
+        if size > MAX_ENCRYPTED_LEN:
+            raise EufyFrameTooLarge(
+                f"Preset too big for the light ({size} encrypted bytes, "
+                f"at most {MAX_ENCRYPTED_LEN})"
+            )
+        async with self.command_lock:
+            for attempt in range(2):
+                try:
+                    await self.async_ensure_connected()
+                    _fragments(0, 2, opcode, bytes(size), self._max_write_len())
+                    await self._send_power(True, self._base_payload())
+                    if brightness is not None:
+                        await asyncio.sleep(HANDSHAKE_STEP_DELAY)
+                        await self._send_brightness(brightness, self._base_payload())
+                    await asyncio.sleep(POWER_TO_COLOR_DELAY)
+                    await self._send_preset(opcode, tail, self._base_payload())
+                    return
+                except EufyFrameTooLarge:
+                    raise
+                except EufyBLEError:
+                    await self.async_disconnect()
+                    if attempt == 1:
+                        raise
+                except Exception as exc:
+                    await self.async_disconnect()
+                    if attempt == 1:
+                        raise EufyBLEError(str(exc)) from exc
+
     async def async_set_state(
         self,
         *,
