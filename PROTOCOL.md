@@ -358,7 +358,8 @@ with the session key like any control frame (opcode has `0x4000` set; decrypt
 - **`0x0200` status query** — `base + a3 <n> <mask>`, where the mask selects
   fields by bit: bit 0 power (`a1`), 1 brightness (`a2`), 2 segments (`a3`),
   3 effect id (`a4`), 4 `a5`, 5 cloud id (`a6`), 6 a 16-byte `a7` (all zero
-  here), 7 `a8` (`02`). `a3 02 ff ff` asks for everything. The reply is
+  here), 7 `a8` (`02`); a 2-byte mask also returns `a9`, the power on/off
+  effect (see below). `a3 02 ff ff` asks for everything. The reply is
   `0x0A00`: a status byte (`00` = ok) followed by the requested TLVs. Field
   widths differ from the report — `a3` segments is 2 bytes and `a4` effect id
   2 bytes here — so read numbers little-endian at whatever length is given.
@@ -371,7 +372,32 @@ with the session key like any control frame (opcode has `0x4000` set; decrypt
 
 After a `0x020D` animation the report can also carry an `a9` field
 (12 bytes: `02 00 00 00`, the cloud id as u32 LE, then a u32 that changes
-between reports); its meaning is unknown.
+between reports); its meaning is unknown. It is unrelated to the 1-byte `a9`
+of the status reply.
+
+### Power on/off effect
+
+By default the controller plays a short rainbow sweep when the lights are
+switched on and a rainbow wipe when they are switched off, whatever scene is
+showing. The eufy app has a setting to turn this off; it is stored on the
+controller.
+
+- **Set it** with `0x0201` (like power and brightness):
+
+  ```
+  base + a7 01 <00 = effect on, 01 = effect off>
+  ```
+
+- **Read it** as `a9` in the `0x0A00` status reply (`00` on, `01` off). The
+  value changes within a second of the command, but the light pushes no
+  `0x0204` report for it, so it has to be polled.
+
+Confirmed on an E22, both ways, by watching the lights switch on and off.
+When the app changes the setting over the cloud, the status reply shows it
+too.
+
+`0x0201` acks unknown tags with status `00` and ignores them, so trying
+tags there won't tell you which ones are real.
 
 The palette itself is not reported, so a colour set by `0x0206` can only be
 tracked optimistically. Each command is also acked with `0x0A01`/`0x0A06`/
