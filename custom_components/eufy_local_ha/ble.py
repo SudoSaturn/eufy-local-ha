@@ -24,6 +24,7 @@ from .const import (
     DEFAULT_WHITE_BALANCE_B,
     DEFAULT_WHITE_BALANCE_G,
     DEFAULT_WHITE_BALANCE_R,
+    SERIAL_REGEX,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -90,7 +91,7 @@ class EufyBLEController:
         self,
         hass: HomeAssistant,
         address: str,
-        serial_number: str,
+        serial_number: str | None,
         user_id: str,
         *,
         gamma: float = DEFAULT_GAMMA,
@@ -100,9 +101,14 @@ class EufyBLEController:
     ) -> None:
         self.hass = hass
         self.mac = address
-        self.sn = serial_number.encode("ascii")
-        self.uid = user_id
-        self.initial_key = user_id[:16].encode("ascii")
+        self.sn: bytes | None = (
+            serial_number.strip().encode("ascii") if serial_number else None
+        )
+        self._serial_number: str | None = (
+            serial_number.strip().upper() if serial_number else None
+        )
+        self.uid = user_id.ljust(40, "0")[:40]
+        self.initial_key = self.uid[:16].encode("ascii")
         self.gamma = gamma
         self.saturation = max(0.0, min(1.0, saturation))
         self.achromatic_ratio = achromatic_ratio
@@ -123,14 +129,18 @@ class EufyBLEController:
         self._status_reply: asyncio.Future[None] | None = None
         self._listeners: list[Callable[[EufyState], None]] = []
 
-        if len(self.sn) != 16:
+        if self.sn is not None and len(self.sn) != 16:
             raise EufyBLEError(
                 "Serial number must be exactly 16 characters"
             )
-        if len(self.initial_key) != 16:
+        if len(user_id.strip()) < 16:
             raise EufyBLEError(
                 "User ID must be at least 16 characters"
             )
+
+    @property
+    def serial_number(self) -> str | None:
+        return self._serial_number
 
     @property
     def connected(self) -> bool:
@@ -183,6 +193,10 @@ class EufyBLEController:
         type_value: int = 1,
     ) -> bytes:
         if encrypted:
+            if not self.sn or len(self.sn) != 16:
+                raise EufyBLEError(
+                    "16-char serial number is required before sending encrypted packets"
+                )
             key = self.session_key or self.initial_key
             payload = AES.new(key, AES.MODE_CBC, iv=self.sn).encrypt(self._pad(payload))
             opcode |= 0x4000
@@ -219,14 +233,47 @@ class EufyBLEController:
         for listener in list(self._listeners):
             listener(self.state)
 
+    async def _probe_gatt_for_serial(self) -> None:
+        if self.client is None:
+            return
+        for service in self.client.services:
+            for char in service.characteristics:
+                if "read" in char.properties:
+                    try:
+                        val = bytes(await self.client.read_gatt_char(char.uuid))
+                        match = SERIAL_REGEX.search(val)
+                        if match and not self.sn:
+                            detected = match.group(1).decode("ascii")
+                            _LOGGER.debug(
+                                "Auto-extracted serial from GATT char %s: %s",
+                                char.uuid,
+                                detected,
+                            )
+                            self.sn = detected.encode("ascii")
+                            self._serial_number = detected
+                            return
+                    except Exception:
+                        pass
+
     def _notification(self, _sender: Any, data: bytearray) -> None:
         raw = bytes(data)
         if len(raw) < 10:
             return
+
+        if self.sn is None:
+            match = SERIAL_REGEX.search(raw)
+            if match:
+                detected = match.group(1).decode("ascii")
+                _LOGGER.debug("Auto-extracted serial from BLE reply: %s", detected)
+                self.sn = detected.encode("ascii")
+                self._serial_number = detected
+
         opcode = struct.unpack(">H", raw[7:9])[0]
-        if opcode == 0x4822:
+        if opcode in (0x0801, 0x0829, 0x0803, 0x0805):
+            _LOGGER.debug("Handshake step reply %04x: %s", opcode, raw[9:-1].hex())
+        elif opcode == 0x4822 and self.sn:
             self._handshake_reply(raw)
-        elif opcode in (0x4204, 0x4A00) and self.session_key is not None:
+        elif opcode in (0x4204, 0x4A00) and self.session_key is not None and self.sn:
             try:
                 plaintext = self._unpad(
                     AES.new(self.session_key, AES.MODE_CBC, iv=self.sn).decrypt(
@@ -310,6 +357,9 @@ class EufyBLEController:
                     use_services_cache=True,
                     timeout=20.0,
                 )
+                if not self.sn:
+                    await self._probe_gatt_for_serial()
+
                 await self.client.start_notify(CHAR_NOTIFY, self._notification)
 
                 base = self._base_payload()
@@ -322,6 +372,9 @@ class EufyBLEController:
                 ):
                     await self._write(self._packet(opcode, payload))
                     await asyncio.sleep(HANDSHAKE_STEP_DELAY)
+
+                if not self.sn:
+                    raise EufyBLEError("Could not auto-detect 16-character serial number")
 
                 aes_payload = base + bytes.fromhex("a304e0e3ffff")
                 await self._write(

@@ -3,18 +3,55 @@
     "flow_title": "{name}",
     "step": {
       "user": {
-        "title": "Eufy Local Light",
-        "description": "Enter the Bluetooth address and credentials. See the README for how to find your serial number and user ID.",
+        "title": "Set up Eufy Local Light",
+        "description": "Choose how you would like to configure your Eufy light.",
+        "menu_options": {
+          "local_pairing": "Fully local",
+          "cloud_login": "Sign in with Eufy Account (Keep Eufy App Working)",
+          "manual": "Manual Entry (Existing User ID & Serial)"
+        }
+      },
+      "local_pairing": {
+        "title": "Fully local",
+        "description": "Hold the physical button on your Eufy light controller until the lights blink to enter pairing mode. Home Assistant will generate an encryption key and bind directly to the light without needing a Eufy account.",
         "data": {
-          "address": "Bluetooth MAC address",
-          "serial_number": "Device serial number (16 characters)",
-          "user_id": "Eufy account user ID"
+          "address": "Bluetooth MAC Address",
+          "serial_number": "16-Character Serial starting with T8L... (optional if auto-detected)"
+        }
+      },
+      "cloud_login": {
+        "title": "Sign in with Eufy Account",
+        "description": "Sign in once with your Eufy credentials to automatically retrieve your account's User ID so both Home Assistant and the Eufy app can control the light.",
+        "data": {
+          "address": "Bluetooth MAC Address",
+          "serial_number": "16-Character Serial starting with T8L... (optional if auto-detected)",
+          "email": "Eufy Account Email",
+          "password": "Eufy Account Password",
+          "country": "Two-Letter Country Code (e.g., US, GB, DE)"
+        }
+      },
+      "2fa": {
+        "title": "Two-Factor Authentication",
+        "description": "Enter the verification code sent to your email or phone.",
+        "data": {
+          "verify_code": "Verification Code"
+        }
+      },
+      "manual": {
+        "title": "Manual Configuration",
+        "description": "Enter your light's Bluetooth MAC address, 16-character serial number, and Eufy User ID manually.",
+        "data": {
+          "address": "Bluetooth MAC Address",
+          "serial_number": "16-Character Serial Starting with T8L... ",
+          "user_id": "Eufy User ID (at least 16 characters)"
         }
       }
     },
     "error": {
-      "invalid_serial": "The serial number must be exactly 16 characters.",
-      "invalid_user_id": "The user ID must be at least 16 characters."
+      "cannot_connect": "Unable to connect. Make sure the light is powered on, in range, and (for Local) in pairing mode.",
+      "invalid_auth": "Invalid credentials or verification code.",
+      "invalid_serial": "Serial number must be exactly 16 ASCII characters.",
+      "invalid_user_id": "User ID must be at least 16 characters."
     },
     "abort": {
       "already_configured": "This light is already configured."
@@ -23,14 +60,14 @@
   "options": {
     "step": {
       "init": {
-        "title": "Color tuning",
-        "description": "Fine-tune how Home Assistant colors map to the strip. When setting up my lights i felt that the colors were always leaning twoards the lighters side. But im also colorblind so your milage may vary",
+        "title": "Color Tuning Options",
+        "description": "Adjust gamma, saturation, achromatic threshold, and white balance for RGB color correction.",
         "data": {
-          "color_gamma": "Gamma (default 1.7)",
-          "color_saturation": "Saturation (1.0 = fully vivid)",
-          "achromatic_ratio": "Neutral threshold",
-          "white_balance_g": "White balance - green",
-          "white_balance_b": "White balance - blue"
+          "color_gamma": "Gamma Correction (0.5 – 3.0)",
+          "color_saturation": "Saturation (0.0 – 1.0)",
+          "achromatic_ratio": "Achromatic Ratio (0.0 – 1.0)",
+          "white_balance_g": "White Balance Green (0.0 – 1.0)",
+          "white_balance_b": "White Balance Blue (0.0 – 1.0)"
         }
       }
     }

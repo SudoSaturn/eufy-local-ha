@@ -13,7 +13,6 @@ And i took that personally.
 ## Requirements
 
 - Home Assistant :)
-- Your light's Bluetooth MAC, serial number, and Eufy user ID (see [Configuration](#configuration))
 
 ## Installation
 
@@ -25,24 +24,26 @@ And i took that personally.
 
 ### Manual
 
-Copy `custom_components/eufy_local` into your Home Assistant `config/custom_components/` directory and restart.
+Copy `custom_components/eufy_local_ha` into your Home Assistant `config/custom_components/` directory and restart.
 
 ## Configuration
 
-Add the integration via Settings > Devices & services > Add integration > Eufy Local Light (it should also be auto discovered over Bluetooth). You will be asked for three values:
+Add the integration via **Settings > Devices & services > Add integration > Eufy Local Light** (It will usually discover it automatically!).
 
-| Field | What it is | Where to find it |
-| --- | --- | --- |
-| Bluetooth MAC | The light's BLE address | should be auto-filled on discovery depending of what model you have but you could also use a BLE scanner like nRF Connect. |
-| Serial number | 16-character device serial | On the device label and in the Eufy app device info. |
-| User ID | Your Eufy account user ID (hex) | The account that paired the light. |
+You can choose whichever setup option works best for you:
 
-### Finding your User ID
+### 1. Fully Local
+If you want your lights completely local without needing an account or sending telemetry to Eufy all day:
+1. Hold the button on the light controller box until the lights blinks twice to enter pairing mode.
+2. Home Assistant will auto-detect the light's Bluetooth address and serial number, create a local encryption key, and youre done!
 
-- Read it from the Eufy Security account API (for example via the community [`eufy-sdk`](https://github.com/mega-yfue/eufy-sdk) project), or
-- Capture the app's HTTPS or BLE handshake traffic once and read the `user_id` field.
+### 2. Sign in with Eufy Account (If you need to keep the Eufy App Working)
+If you still neeed to use the official Eufy phone app alongside Home Assistant:
+1. Enter your Eufy email and password (plus your 2FA verification code if you have it turned on).
+2. Home Assistant will log in once to get your account ID and light's serial number so both Home Assistant and the Eufy app can control the lights.
 
-To learn more about how i reversed it and where these are used you can read [PROTOCOL.md](PROTOCOL.md).
+### 3. Manual Entry
+Mostly as a fallback if for some reason options 1 and 2 dont work. you'll need yo type in your 16-character serial number, and Eufy User ID.
 
 ## Options: color tuning
 
@@ -60,8 +61,7 @@ you can tune these from Settings > Devices & services > Eufy Local Light > Confi
 | White balance, green | 0.85 | Lower if whites look green |
 | White balance, blue | 0.55 | Lower if whites look blue; raise if amber |
 
-### If you're having issues and disconnections make sure that you don't have the Eufy app connected! it allows one bluetooth connection at a time and you'd have to re-pair!.
-
+### If you're having issues and disconnections make sure that you don't have the Eufy app connected while using local mode!
 
 If you're just here to get your lights working this probably won't be your cup of tea but feel free to see [PROTOCOL.md](PROTOCOL.md) for complete breakdown :)
 
