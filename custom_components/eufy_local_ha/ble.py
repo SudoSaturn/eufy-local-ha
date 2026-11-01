@@ -5,13 +5,15 @@ import contextlib
 import logging
 import struct
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import Any
 
 from bleak import BleakClient
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 from Crypto.Cipher import AES
 from homeassistant.components import bluetooth
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 
 from .const import (
     CHAR_NOTIFY,
@@ -27,6 +29,55 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 HANDSHAKE_STEP_DELAY = 0.15
 POWER_TO_COLOR_DELAY = 0.5
+STATUS_TIMEOUT = 3.0
+
+# 0x0200 is a getter: its a3 field is a bitmask of the state fields wanted
+# (bit 0 power, 1 brightness, 2 segments, 3 effect, ...); all ones asks for
+# everything. The reply is 0x0A00.
+STATUS_QUERY = bytes.fromhex("a302ffff")
+
+
+@dataclass(frozen=True)
+class EufyState:
+    """State the light reports about itself."""
+
+    is_on: bool | None = None
+    brightness: int | None = None  # 0..100
+    segments: int | None = None
+    effect_id: int | None = None
+    # The eufy app's id for the preset or scene that is running; 0 for a
+    # colour set outside the app's preset list.
+    cloud_id: int | None = None
+
+
+def _parse_state(body: bytes, previous: EufyState) -> EufyState:
+    """Merge the TLVs of a state report or status reply into previous.
+
+    The pushed 0x0204 report and the 0x0A00 reply use the same tags, but not
+    always the same widths (a3/a4 are 1 and 4 bytes in the report, 2 and 2 in
+    the reply), so numbers are read little-endian at whatever length is given.
+    """
+    fields: dict[int, int] = {}
+    index = 0
+    while index + 2 <= len(body):
+        tag, length = body[index], body[index + 1]
+        value = body[index + 2 : index + 2 + length]
+        if len(value) != length:
+            break
+        fields[tag] = int.from_bytes(value, "little") if length <= 4 else 0
+        index += 2 + length
+    state = previous
+    if 0xA1 in fields:
+        state = replace(state, is_on=fields[0xA1] != 0)
+    if 0xA2 in fields:
+        state = replace(state, brightness=fields[0xA2])
+    if 0xA3 in fields:
+        state = replace(state, segments=fields[0xA3])
+    if 0xA4 in fields:
+        state = replace(state, effect_id=fields[0xA4])
+    if 0xA6 in fields:
+        state = replace(state, cloud_id=fields[0xA6])
+    return state
 
 
 class EufyBLEError(Exception):
@@ -68,6 +119,9 @@ class EufyBLEController:
         self.current_brightness = 100
         self.command_lock = asyncio.Lock()
         self.connect_lock = asyncio.Lock()
+        self.state = EufyState()
+        self._status_reply: asyncio.Future[None] | None = None
+        self._listeners: list[Callable[[EufyState], None]] = []
 
         if len(self.sn) != 16:
             raise EufyBLEError(
@@ -147,10 +201,52 @@ class EufyBLEController:
         self.session_key = None
         self.session_key_ready.clear()
 
+    @callback
+    def async_subscribe(
+        self, listener: Callable[[EufyState], None]
+    ) -> CALLBACK_TYPE:
+        """Call listener with the new state whenever the light reports one."""
+        self._listeners.append(listener)
+
+        @callback
+        def unsubscribe() -> None:
+            self._listeners.remove(listener)
+
+        return unsubscribe
+
+    def _update_state(self, body: bytes) -> None:
+        self.state = _parse_state(body, self.state)
+        for listener in list(self._listeners):
+            listener(self.state)
+
     def _notification(self, _sender: Any, data: bytearray) -> None:
         raw = bytes(data)
-        if len(raw) < 10 or raw[7:9] != bytes.fromhex("4822"):
+        if len(raw) < 10:
             return
+        opcode = struct.unpack(">H", raw[7:9])[0]
+        if opcode == 0x4822:
+            self._handshake_reply(raw)
+        elif opcode in (0x4204, 0x4A00) and self.session_key is not None:
+            try:
+                plaintext = self._unpad(
+                    AES.new(self.session_key, AES.MODE_CBC, iv=self.sn).decrypt(
+                        raw[9:-1]
+                    )
+                )
+            except Exception:
+                _LOGGER.debug("Cant decrypt %04x notification", opcode, exc_info=True)
+                return
+            if opcode == 0x4204:
+                # Pushed after every change: bare TLVs.
+                self._update_state(plaintext)
+            else:
+                # Reply to a 0x0200 query: a status byte (0 = ok), then TLVs.
+                if plaintext[:1] == b"\x00":
+                    self._update_state(plaintext[1:])
+                if self._status_reply and not self._status_reply.done():
+                    self._status_reply.set_result(None)
+
+    def _handshake_reply(self, raw: bytes) -> None:
         try:
             plaintext = self._unpad(
                 AES.new(self.initial_key, AES.MODE_CBC, iv=self.sn).decrypt(raw[9:-1])
@@ -237,6 +333,31 @@ class EufyBLEController:
             except Exception as exc:
                 await self._disconnect_unlocked()
                 raise EufyBLEError(f"Unable to establish session: {exc}") from exc
+
+    async def async_request_status(self) -> EufyState:
+        """Ask the light for its full state, connecting first if necessary."""
+        async with self.command_lock:
+            try:
+                await self.async_ensure_connected()
+                self._status_reply = asyncio.get_running_loop().create_future()
+                await self._write(
+                    self._packet(
+                        0x0200,
+                        self._base_payload() + STATUS_QUERY,
+                        encrypted=True,
+                        type_value=2,
+                    )
+                )
+                await asyncio.wait_for(self._status_reply, timeout=STATUS_TIMEOUT)
+            except EufyBLEError:
+                await self.async_disconnect()
+                raise
+            except Exception as exc:
+                await self.async_disconnect()
+                raise EufyBLEError(f"No status reply: {exc}") from exc
+            finally:
+                self._status_reply = None
+        return self.state
 
     async def _send_power(self, is_on: bool, base_payload: bytes) -> None:
         payload = base_payload + bytes.fromhex("a301") + (
