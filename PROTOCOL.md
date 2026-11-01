@@ -228,6 +228,17 @@ scene keeps running. The last byte of the ack differed between the two
 rejections seen (`01 a1 01 01` and `01 a1 01 02`), so it may say what was
 wrong.
 
+**Frames over 240 encrypted bytes are ignored.** The light gives no ack at
+all and keeps its previous scene. With the 48-byte `a1`/`a2` envelope and
+PKCS#7 padding, that leaves at most 191 bytes for everything from `a3` on.
+Tested on an E22 through an ESP32 Bluetooth proxy whose link MTU was 500,
+so the limit is the light's, not the link's: a 191-byte frame played, a
+192-byte one (256 bytes encrypted) got no ack, and splitting a packet over
+several GATT writes didn't help. 10 of the 77 captured presets are bigger
+than this (e.g. "Holiday: Christmas Day", "Culture: Celebrating"). How the
+eufy app sends them is not known: they were captured from its cloud link,
+not over Bluetooth.
+
 The meanings below come from replaying single-byte changes on a real E22
 and watching the strip — first on Spain's layer, then on one layer with a
 single colour (red), which makes the cell structure easy to see. "Not
@@ -358,7 +369,8 @@ with the session key like any control frame (opcode has `0x4000` set; decrypt
 - **`0x0200` status query** — `base + a3 <n> <mask>`, where the mask selects
   fields by bit: bit 0 power (`a1`), 1 brightness (`a2`), 2 segments (`a3`),
   3 effect id (`a4`), 4 `a5`, 5 cloud id (`a6`), 6 a 16-byte `a7` (all zero
-  here), 7 `a8` (`02`). `a3 02 ff ff` asks for everything. The reply is
+  here), 7 `a8` (`02`); a 2-byte mask also returns `a9`, the power on/off
+  effect (see below). `a3 02 ff ff` asks for everything. The reply is
   `0x0A00`: a status byte (`00` = ok) followed by the requested TLVs. Field
   widths differ from the report — `a3` segments is 2 bytes and `a4` effect id
   2 bytes here — so read numbers little-endian at whatever length is given.
@@ -371,11 +383,213 @@ with the session key like any control frame (opcode has `0x4000` set; decrypt
 
 After a `0x020D` animation the report can also carry an `a9` field
 (12 bytes: `02 00 00 00`, the cloud id as u32 LE, then a u32 that changes
-between reports); its meaning is unknown.
+between reports); its meaning is unknown. It is unrelated to the 1-byte `a9`
+of the status reply.
+
+### Power on/off effect
+
+By default the controller plays a short rainbow sweep when the lights are
+switched on and a rainbow wipe when they are switched off, whatever scene is
+showing. The eufy app has a setting to turn this off; it is stored on the
+controller.
+
+- **Set it** with `0x0201` (like power and brightness):
+
+  ```
+  base + a7 01 <00 = effect on, 01 = effect off>
+  ```
+
+- **Read it** as `a9` in the `0x0A00` status reply (`00` on, `01` off). The
+  value changes within a second of the command, but the light pushes no
+  `0x0204` report for it, so it has to be polled.
+
+Confirmed on an E22, both ways, by watching the lights switch on and off.
+When the app changes the setting over the cloud, the status reply shows it
+too.
+
+`0x0201` acks unknown tags with status `00` and ignores them, so trying
+tags there won't tell you which ones are real.
+
+### Blockout — `0x0201` `a6`
+
+The eufy app's "blockout" holds chosen lights permanently off, whatever
+scene or colour is showing. It is another controller setting on `0x0201`:
+
+```
+base + a6 03 <mask: u24 LE>
+```
+
+Bit *n* holds light *n* + 1 off, counting from the controller end; `00 00
+00` clears it. Worked out from a capture of the app blocking out each group
+of four lights along a 20-light string in turn:
+
+| Lights held off | `a6` |
+| --- | --- |
+| 1–4 | `0f 00 00` |
+| 5–8 | `f0 00 00` |
+| 9–12 | `00 0f 00` |
+| 13–16 | `00 f0 00` |
+| 17–20 | `00 00 0f` |
+| 1, 3, 5, 7, 9 | `55 01 00` |
+| 11, 13, 15, 17, 19 | `00 54 05` |
+
+The light acks each with `0x0A01`, status `00`, and reports the mask back
+as `a7` in the `0x0A00` status reply: 16 bytes, little-endian, with the same
+bit order (`a7 10 0f 00 …` with lights 1–4 held off, `a7 10 00 01 08 00 …`
+with lights 9 and 20). The pushed `0x0204` report does not carry it; its
+one-byte `a7` is unrelated. A 16-byte mask has room for 128 lights, so the
+3-byte `a6` may grow on longer strings; only a 20-light E22 has been tried.
+
+Confirmed on an E22 by watching the string: `0f 00 00` darkened the four
+lights nearest the controller, and `00 01 08` lights 9 and 20. The
+controller accepts and reports the mask even with no string plugged in.
+
+### Schedules — `0x0207` / `0x0208`
+
+The controller runs scene schedules itself. Adding one in the app (the
+Halloween scene, default start and stop times) sent the scene's `0x020D`
+frame and then `0x0207`; removing it sent `0x0208`. Both ack with status
+`00` (`0x0A07`, `0x0A08`). Fields as captured, with a tentative reading:
+
+```
+0x0207: base + a3 02 f3 ff         id (0x0208 removes by it)
+             + a4 01 01            enabled?
+             + a5 02 0a 1d         start date: month, day (29 Oct)
+             + a6 02 0a 1d         end date: month, day
+             + a8 02 12 00         start time: hour, minute (18:00)
+             + a9 02 06 00         stop time: hour, minute (06:00)
+             + aa 04 04 29 00 00   scene cloud id (10500)
+             + b3 04 00 00 00 00   unknown
+             + b4 04 00 00 00 00   unknown
+             + b5 01 00            unknown
+             + b6 01 50            brightness (80%)
+
+0x0208: base + a3 02 f3 ff         id
+```
+
+Added at 20:03, inside its 18:00–06:00 window, the schedule started the
+scene at once (the status reply showed it on at 80%, with cloud id 10500
+in `a6`), and removing it turned the lights off. So the controller must keep
+its own clock; nothing seen over Bluetooth sets it.
+
+The scene's cloud id (10500) is not the one the Halloween preset carries
+when played directly (10475, see `effects.json`), although the app sent
+the same scene's frames just before; the scheduler may use its own copy.
+
+Not seen over Bluetooth at all: the app's device information page, its
+installation-space settings and its firmware check, which presumably go
+over the cloud.
 
 The palette itself is not reported, so a colour set by `0x0206` can only be
 tracked optimistically. Each command is also acked with `0x0A01`/`0x0A06`/
 `0x0A0D` carrying a status byte.
+
+### Wi-Fi network — `0x0032`
+
+The eufy app sets the controller's Wi-Fi network over Bluetooth, after the
+usual handshake. Captured from the app on an iPhone (Apple's Bluetooth
+logging profile, then a sysdiagnose's `bluetoothd-hci-*.pklg`), changing the
+network to a WPA2 one:
+
+```
+type 2, encrypted with the session key
+base + a3 <n> <SSID>
+     + a4 01 00
+     + a5 01 00
+     + a6 <n> <password>
+```
+
+The SSID and password are plain bytes, not padded or terminated. `a4` and
+`a5` were both `00`; they are probably the security type and a hidden-network
+flag, but a capture of another kind of network would be needed to tell.
+
+The light answers with `0x0832` carrying a status byte, `00` when it accepts
+the network. The reply comes 7 to 11 seconds after the write, not
+immediately (measured on an E22: about 7 s re-sending the network it was
+on, about 11 s moving it to a different one).
+What a non-zero status means is not yet known.
+
+While its Wi-Fi screen is open the app also sends `0x0026` with no fields
+(type 1, encrypted) every 10 seconds, which the light acks with `0x0826`,
+status `00`: a keepalive.
+
+The app's `0x0022` key request carries `a3 04 00 00 00 00` rather than
+`e0 e3 ff ff`; the light hands out a session key either way.
+
+**This exposes the Wi-Fi password to anyone listening.** The initial key is
+the first 16 characters of the user id, which the handshake sends in clear
+text in `a2`, and the session key comes back encrypted under it. Anyone who
+records a setup can decrypt the password from the recording.
+
+### Split frames
+
+A command too long for one write is sent as several frames that share one
+sequence number. Each has `0x8000` set in its opcode (so an encrypted
+`0x0033` goes out as `0xC033`) and starts its payload with one byte, the
+fragment's number in the high nibble and the total in the low one (`0x12`,
+then `0x22`). The rest of each payload is a slice of the one AES-CBC
+ciphertext: join the slices, then decrypt. The app cut after 129
+ciphertext bytes, giving a 140-byte first frame.
+
+### Onboarding — first setup of a new light
+
+Captured from the app adding a factory-new E22 to an account. After the
+usual handshake (`0x0001`, `0x0029`, `0x0003`, `0x0005`, `0x0022`; the new
+light took the account's user id like any other), the app sent:
+
+| Opcode | Payload after `base` | Reply | What it seems to be |
+| --- | --- | --- | --- |
+| `0x0023` (type 1, encrypted) | `a3 10 <serial>` | `0x0823`, `00` | Confirm which light this is |
+| `0x0300` (type 2, encrypted) | none | `0x0B00`, `00`, then `a1` 32 hex chars, `a2` 32 hex chars, `a3` 10 digits | Identity values for registering the light with the cloud |
+| `0x0030` (type 1, encrypted) | none | `0x0830`, `00` | Start setup |
+| `0x020A` (type 2, encrypted) | `a3 <POSIX TZ>` `a4 <IANA zone>` | `0x0A0A`, `00` | Time zone, e.g. `GMT0BST,M3.5.0/1,M10.5.0` and `Europe/London` |
+| `0x0032` | see above | `0x0832`, `00` after ~7 s | Wi-Fi network |
+| `0x0033` (type 2, encrypted, split) | see below | `0x0833`, `00`, `a1 04 00 00 00 00` after ~11 s | Cloud registration |
+
+`0x0300`'s values differ per light and look like secrets, so they are not
+reproduced here.
+
+`0x0033` carries:
+
+```
+a3 <API base URL>      https://aiot-light-api-eu.eufylife.com
+a4 <POSIX TZ>          GMT0BST,M3.5.0/1,M10.5.0
+a5 <country>           GB
+a6 <app>               eufy_life
+a7 <model>             T8L02
+a8 <IANA zone>         Europe/London
+aa <device name>       the light's name in the app
+```
+
+No MQTT broker, certificate or account token is sent over Bluetooth, so the
+light must get those from the API at `a3`.
+
+### Repair — re-joining Wi-Fi and the cloud
+
+When an already-registered light is offline, the app (with Bluetooth on)
+says its Wi-Fi is not configured. That judgement comes from the cloud: no
+Bluetooth query for it was seen. Its fix is the tail of onboarding: `0x0032`
+with the network, then `0x0033` with the same fields as above (including the
+light's name), sent 37 ms after the light's `0x0832`. The light answered
+`0x0833` 11 seconds later and was back online.
+
+The order matters. Sending `0x0033` first and `0x0032` after left the light
+offline, and no `0x0833` ever came; the reply seems to arrive only once the
+light has reached the API.
+
+### Pointing the light at another API
+
+The light acts on `0x0033` at once. Sent with `a3` set to
+`https://<a LAN address>`, it opened a TLS connection to that address within
+a second, nine times about 2.5 s apart, then gave up. Each time it finished
+the TLS handshake with a self-signed certificate and then closed the
+connection without sending a request, so it seems to check the server
+certificate after the handshake. With an `http://` address it made no
+connection at all. Neither attempt returned a `0x0833`, and restoring the
+eufy URL took the repair sequence above.
+
+Whether it would accept a certificate from a public CA for a hostname
+under one's own control (rather than only eufy's) is untested.
 
 ### Device-specific values (example)
 
