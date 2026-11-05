@@ -47,11 +47,12 @@ Mostly as a fallback if for some reason options 1 and 2 dont work. you'll need y
 
 ## Options: color tuning
 
-Raw sRGB doesnt seem to look right on these LEDs so i adjusted the saturation to to stops light colors from washing out to white (kinda).
+Raw sRGB doesnt seem to look right to me on these LEDs so i adjusted the saturation to to stops light colors from washing out to white (kinda).
 
-(With that being said. i am severly colorblind so it might not actually be as accurate as it seems to me)
 
-you can tune these from Settings > Devices & services > Eufy Local Light > Configure:
+(with that being said i am severly colorblind so it might not actually be as accurate as it seems to me)
+
+Therefore you can tune these from Settings > Devices & services > Eufy Local Light > Configure:
 
 | Option | Default | Effect |
 | --- | --- | --- |
