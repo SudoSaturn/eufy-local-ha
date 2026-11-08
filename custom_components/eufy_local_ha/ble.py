@@ -31,6 +31,20 @@ _LOGGER = logging.getLogger(__name__)
 HANDSHAKE_STEP_DELAY = 0.15
 POWER_TO_COLOR_DELAY = 0.5
 STATUS_TIMEOUT = 3.0
+# A command bigger than one write goes as fragments, the way the eufy app
+# sends it: each a frame of its own (header, length, checksum) with 0x8000
+# set in the opcode and a part byte (part << 4 | total) ahead of its slice
+# of the ciphertext. The app's fragments are at most 140 bytes.
+FRAGMENT_LEN = 140
+FRAGMENT_FLAG = 0x8000
+MAX_FRAGMENTS = 15  # the part byte has four bits for the total
+FRAGMENT_DELAY = 0.03  # the app's gap between fragments
+# The light ignores a command, fragmented or not, whose encrypted body is
+# longer: 1008 bytes played on an E22, 1024 never got an ack.
+MAX_ENCRYPTED_LEN = 1008
+# A write without response carries at most the link's ATT MTU less this
+# header; anything longer never reaches the light.
+ATT_HEADER_LEN = 3
 
 # 0x0200 is a getter: its a3 field is a bitmask of the state fields wanted
 # (bit 0 power, 1 brightness, 2 segments, 3 effect, ...); all ones asks for
@@ -49,6 +63,25 @@ class EufyState:
     # The eufy app's id for the preset or scene that is running; 0 for a
     # colour set outside the app's preset list.
     cloud_id: int | None = None
+
+
+def _checksum(data: bytes) -> bytes:
+    value = 0
+    for byte in data:
+        value ^= byte
+    return bytes([value])
+
+
+def _frame(seq: int, type_value: int, opcode: int, payload: bytes) -> bytes:
+    packet = (
+        bytes.fromhex("ff09")
+        + struct.pack("<H", len(payload) + 10)
+        + struct.pack("<H", seq)
+        + bytes([type_value])
+        + struct.pack(">H", opcode)
+        + payload
+    )
+    return packet + _checksum(packet)
 
 
 def _parse_state(body: bytes, previous: EufyState) -> EufyState:
@@ -83,6 +116,36 @@ def _parse_state(body: bytes, previous: EufyState) -> EufyState:
 
 class EufyBLEError(Exception):
     """BLE transport or protocol error."""
+
+
+class EufyFrameTooLarge(EufyBLEError):
+    """A command too big to send even in fragments, refused before sending."""
+
+
+def _fragments(
+    seq: int, type_value: int, opcode: int, payload: bytes, max_len: int
+) -> list[bytes]:
+    """Frame a command, splitting it into fragments if it won't fit max_len."""
+    whole = _frame(seq, type_value, opcode, payload)
+    if len(whole) <= max_len:
+        return [whole]
+    # Every fragment has a 10-byte frame plus its part byte around its slice.
+    chunk = max_len - 11
+    parts = [payload[i : i + chunk] for i in range(0, len(payload), chunk)]
+    if len(parts) > MAX_FRAGMENTS:
+        raise EufyFrameTooLarge(
+            f"Command too big for the light ({len(payload)} bytes, "
+            f"at most {MAX_FRAGMENTS} fragments of {chunk})"
+        )
+    return [
+        _frame(
+            seq,
+            type_value,
+            opcode | FRAGMENT_FLAG,
+            bytes([index << 4 | len(parts)]) + part,
+        )
+        for index, part in enumerate(parts, 1)
+    ]
 
 
 class EufyBLEController:
@@ -164,13 +227,6 @@ class EufyBLEController:
             raise EufyBLEError("Invalid PKCS#7 padding")
         return data[:-length]
 
-    @staticmethod
-    def _checksum(data: bytes) -> bytes:
-        value = 0
-        for byte in data:
-            value ^= byte
-        return bytes([value])
-
     def _next_seq(self) -> int:
         value = self.seq
         self.seq = 1 if self.seq >= 0xFFFF else self.seq + 1
@@ -192,6 +248,20 @@ class EufyBLEController:
         encrypted: bool = False,
         type_value: int = 1,
     ) -> bytes:
+        return self._packets(
+            opcode, payload, encrypted=encrypted, type_value=type_value
+        )[0]
+
+    def _packets(
+        self,
+        opcode: int,
+        payload: bytes,
+        *,
+        encrypted: bool = False,
+        type_value: int = 1,
+        max_len: int | None = None,
+    ) -> list[bytes]:
+        """Frame a command, as fragments of at most max_len bytes if given."""
         if encrypted:
             if not self.sn or len(self.sn) != 16:
                 raise EufyBLEError(
@@ -201,15 +271,15 @@ class EufyBLEController:
             payload = AES.new(key, AES.MODE_CBC, iv=self.sn).encrypt(self._pad(payload))
             opcode |= 0x4000
 
-        packet = (
-            bytes.fromhex("ff09")
-            + struct.pack("<H", len(payload) + 10)
-            + struct.pack("<H", self._next_seq())
-            + bytes([type_value])
-            + struct.pack(">H", opcode)
-            + payload
-        )
-        return packet + self._checksum(packet)
+        if len(payload) > MAX_ENCRYPTED_LEN:
+            raise EufyFrameTooLarge(
+                f"Command too big for the light ({len(payload)} bytes, "
+                f"at most {MAX_ENCRYPTED_LEN})"
+            )
+        seq = self._next_seq()
+        if max_len is None:
+            return [_frame(seq, type_value, opcode, payload)]
+        return _fragments(seq, type_value, opcode, payload, max_len)
 
     def _on_disconnect(self, _client: BleakClient) -> None:
         self.session_key = None
@@ -311,6 +381,12 @@ class EufyBLEController:
             raise EufyBLEError("BLE is unavailable")
         await self.client.write_gatt_char(CHAR_WRITE, packet, response=False)
 
+    async def _write_packets(self, packets: list[bytes]) -> None:
+        for index, packet in enumerate(packets):
+            if index:
+                await asyncio.sleep(FRAGMENT_DELAY)
+            await self._write(packet)
+
     async def _disconnect_unlocked(self) -> None:
         client, self.client = self.client, None
         self.session_key = None
@@ -411,6 +487,15 @@ class EufyBLEController:
             finally:
                 self._status_reply = None
         return self.state
+
+    def _max_write_len(self) -> int:
+        # Links negotiate very different MTUs (185 on macOS, 500 through an
+        # ESPHome proxy); fragments never exceed the app's size, and shrink
+        # further if the link can't carry even that in one write.
+        mtu = getattr(self.client, "mtu_size", None)
+        if isinstance(mtu, int):
+            return min(FRAGMENT_LEN, mtu - ATT_HEADER_LEN)
+        return FRAGMENT_LEN
 
     async def _send_power(self, is_on: bool, base_payload: bytes) -> None:
         payload = base_payload + bytes.fromhex("a301") + (

@@ -228,16 +228,16 @@ scene keeps running. The last byte of the ack differed between the two
 rejections seen (`01 a1 01 01` and `01 a1 01 02`), so it may say what was
 wrong.
 
-**Frames over 240 encrypted bytes are ignored.** The light gives no ack at
-all and keeps its previous scene. With the 48-byte `a1`/`a2` envelope and
-PKCS#7 padding, that leaves at most 191 bytes for everything from `a3` on.
-Tested on an E22 through an ESP32 Bluetooth proxy whose link MTU was 500,
-so the limit is the light's, not the link's: a 191-byte frame played, a
-192-byte one (256 bytes encrypted) got no ack, and splitting a packet over
-several GATT writes didn't help. 10 of the 77 captured presets are bigger
-than this (e.g. "Holiday: Christmas Day", "Culture: Celebrating"). How the
-eufy app sends them is not known: they were captured from its cloud link,
-not over Bluetooth.
+**An unsplit frame over 240 encrypted bytes is ignored.** The light gives
+no ack at all and keeps its previous scene. With the 48-byte `a1`/`a2`
+envelope and PKCS#7 padding, that leaves at most 191 bytes for everything
+from `a3` on. Tested on an E22 through an ESP32 Bluetooth proxy whose link
+MTU was 500, so the limit is the light's, not the link's: a 191-byte frame
+played, and a 192-byte one (256 bytes encrypted) got no ack, even cut over
+several GATT writes without fragment headers. 10 of the 78 captured presets
+are bigger than this (e.g. "Holiday: Christmas Day", "Culture:
+Celebrating"). Sent as [split frames](#split-frames), they all play: that
+is how the eufy app sends them over Bluetooth.
 
 The meanings below come from replaying single-byte changes on a real E22
 and watching the strip — first on Spain's layer, then on one layer with a
@@ -530,6 +530,26 @@ fragment's number in the high nibble and the total in the low one (`0x12`,
 then `0x22`). The rest of each payload is a slice of the one AES-CBC
 ciphertext: join the slices, then decrypt. The app cut after 129
 ciphertext bytes, giving a 140-byte first frame.
+
+The app splits preset animations (`0x020D`) the same way, and every
+command over 140 bytes, not only those too long for the link: captured
+from an iPhone, "Moods: Excited" (186 bytes) went as 140 + 58, and
+"Culture: Celebrating" (378) as 140 + 140 + 121, about 30 ms apart.
+Sending them like that also works where a single write can't: an
+unfragmented write without response can be at most the ATT MTU less 3
+bytes, and a Mac's link to the light negotiates an MTU of 185, so a frame
+over 182 bytes never arrives. Neither a long write (write with response)
+nor cutting a frame into writes without fragment headers gets past that:
+the light answers a long write with ATT error 13, "Invalid Attribute Value
+Length", and ignores headerless pieces.
+
+**A split command can be at most 1008 encrypted bytes.** Probe animations
+padded with an unknown tag played at every size up to 1008 encrypted bytes
+(up to 8 fragments), and at 1024 got no ack in any of seven tries, with
+all eight fragments sent: about a 1024-byte buffer for the reassembled
+frame. A frame cut into 8 smaller fragments played too, so the limit is
+the size, not the fragment count. The same on an E22 (firmware `2.0.4.0`)
+and an E10 spotlight (`2.0.3.8`).
 
 ### Onboarding — first setup of a new light
 
