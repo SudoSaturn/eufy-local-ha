@@ -26,7 +26,7 @@ _LOGGER = logging.getLogger(__name__)
 # Models with dedicated warm/cool white LEDs, driven as RGBWW (matched on the
 # serial-number prefix). Everything else keeps the original RGB mode and the
 # gamma/white-balance correction in EufyBLEController.
-RGBWW_SERIAL_PREFIXES = ("T8L02",)
+RGBWW_SERIAL_PREFIXES = ("T8L02", "T8L20")
 
 
 async def async_setup_entry(
@@ -48,9 +48,8 @@ class EufyLocalLight(LightEntity):
     def __init__(self, entry: ConfigEntry) -> None:
         self.controller: EufyBLEController = entry.runtime_data
         serial = entry.data[CONF_SERIAL_NUMBER]
-        # The E22 (T8L02) has dedicated warm- and cool-white LEDs, so it is an
-        # RGBWW light (rgbww_color is r, g, b, cold_white, warm_white). The E10
-        # and other models have no separate white LEDs and keep plain RGB.
+        # The E22 (T8L02) and E10 spotlights (T8L20) have warm- and cool-white
+        # LEDs, so are RGBWW (r, g, b, cold_white, warm_white). Others are RGB.
         if serial.upper().startswith(RGBWW_SERIAL_PREFIXES):
             self._attr_supported_color_modes = {ColorMode.RGBWW}
             self._attr_color_mode = ColorMode.RGBWW
