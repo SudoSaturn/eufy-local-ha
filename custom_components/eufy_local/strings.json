@@ -71,5 +71,17 @@
         }
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "light_count": {
+        "name": "Lights"
+      }
+    },
+    "switch": {
+      "power_effect": {
+        "name": "Power on/off effect"
+      }
+    }
   }
 }

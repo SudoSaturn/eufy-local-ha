@@ -5,7 +5,7 @@ import re
 import secrets
 
 DOMAIN = "eufy_local"
-PLATFORMS = ["light"]
+PLATFORMS = ["light", "sensor", "switch"]
 
 CONF_SERIAL_NUMBER = "serial_number"
 CONF_USER_ID = "user_id"

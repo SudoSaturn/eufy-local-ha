@@ -31,6 +31,20 @@ _LOGGER = logging.getLogger(__name__)
 HANDSHAKE_STEP_DELAY = 0.15
 POWER_TO_COLOR_DELAY = 0.5
 STATUS_TIMEOUT = 3.0
+# A command bigger than one write goes as fragments, the way the eufy app
+# sends it: each a frame of its own (header, length, checksum) with 0x8000
+# set in the opcode and a part byte (part << 4 | total) ahead of its slice
+# of the ciphertext. The app's fragments are at most 140 bytes.
+FRAGMENT_LEN = 140
+FRAGMENT_FLAG = 0x8000
+MAX_FRAGMENTS = 15  # the part byte has four bits for the total
+FRAGMENT_DELAY = 0.03  # the app's gap between fragments
+# The light ignores a command, fragmented or not, whose encrypted body is
+# longer: 1008 bytes played on an E22, 1024 never got an ack.
+MAX_ENCRYPTED_LEN = 1008
+# A write without response carries at most the link's ATT MTU less this
+# header; anything longer never reaches the light.
+ATT_HEADER_LEN = 3
 
 # 0x0200 is a getter: its a3 field is a bitmask of the state fields wanted
 # (bit 0 power, 1 brightness, 2 segments, 3 effect, ...); all ones asks for
@@ -49,6 +63,50 @@ class EufyState:
     # The eufy app's id for the preset or scene that is running; 0 for a
     # colour set outside the app's preset list.
     cloud_id: int | None = None
+    # Whether the controller plays its rainbow sweep when the lights are
+    # switched on and off. Only the 0x0A00 status reply carries it.
+    power_effect: bool | None = None
+
+
+def _tlvs(body: bytes) -> dict[int, bytes]:
+    fields: dict[int, bytes] = {}
+    index = 0
+    while index + 2 <= len(body):
+        tag, length = body[index], body[index + 1]
+        value = body[index + 2 : index + 2 + length]
+        if len(value) != length:
+            break
+        fields[tag] = value
+        index += 2 + length
+    return fields
+
+
+def _checksum(data: bytes) -> bytes:
+    value = 0
+    for byte in data:
+        value ^= byte
+    return bytes([value])
+
+
+def _frame(seq: int, type_value: int, opcode: int, payload: bytes) -> bytes:
+    packet = (
+        bytes.fromhex("ff09")
+        + struct.pack("<H", len(payload) + 10)
+        + struct.pack("<H", seq)
+        + bytes([type_value])
+        + struct.pack(">H", opcode)
+        + payload
+    )
+    return packet + _checksum(packet)
+
+
+def _envelope(user_id: str) -> bytes:
+    return (
+        bytes.fromhex("a104")
+        + struct.pack("<I", int(time.time()))
+        + bytes.fromhex("a228")
+        + user_id.encode("ascii")
+    )
 
 
 def _parse_state(body: bytes, previous: EufyState) -> EufyState:
@@ -58,15 +116,11 @@ def _parse_state(body: bytes, previous: EufyState) -> EufyState:
     always the same widths (a3/a4 are 1 and 4 bytes in the report, 2 and 2 in
     the reply), so numbers are read little-endian at whatever length is given.
     """
-    fields: dict[int, int] = {}
-    index = 0
-    while index + 2 <= len(body):
-        tag, length = body[index], body[index + 1]
-        value = body[index + 2 : index + 2 + length]
-        if len(value) != length:
-            break
-        fields[tag] = int.from_bytes(value, "little") if length <= 4 else 0
-        index += 2 + length
+    tlvs = _tlvs(body)
+    fields = {
+        tag: int.from_bytes(value, "little") if len(value) <= 4 else 0
+        for tag, value in tlvs.items()
+    }
     state = previous
     if 0xA1 in fields:
         state = replace(state, is_on=fields[0xA1] != 0)
@@ -78,11 +132,45 @@ def _parse_state(body: bytes, previous: EufyState) -> EufyState:
         state = replace(state, effect_id=fields[0xA4])
     if 0xA6 in fields:
         state = replace(state, cloud_id=fields[0xA6])
+    # In the status reply a9 is one byte (00 = power on/off effect on, 01 =
+    # off); a pushed 0x0204 report can carry an unrelated 12-byte a9.
+    if len(tlvs.get(0xA9, b"")) == 1:
+        state = replace(state, power_effect=tlvs[0xA9] == b"\x00")
     return state
 
 
 class EufyBLEError(Exception):
     """BLE transport or protocol error."""
+
+
+class EufyFrameTooLarge(EufyBLEError):
+    """A command too big to send even in fragments, refused before sending."""
+
+
+def _fragments(
+    seq: int, type_value: int, opcode: int, payload: bytes, max_len: int
+) -> list[bytes]:
+    """Frame a command, splitting it into fragments if it won't fit max_len."""
+    whole = _frame(seq, type_value, opcode, payload)
+    if len(whole) <= max_len:
+        return [whole]
+    # Every fragment has a 10-byte frame plus its part byte around its slice.
+    chunk = max_len - 11
+    parts = [payload[i : i + chunk] for i in range(0, len(payload), chunk)]
+    if len(parts) > MAX_FRAGMENTS:
+        raise EufyFrameTooLarge(
+            f"Command too big for the light ({len(payload)} bytes, "
+            f"at most {MAX_FRAGMENTS} fragments of {chunk})"
+        )
+    return [
+        _frame(
+            seq,
+            type_value,
+            opcode | FRAGMENT_FLAG,
+            bytes([index << 4 | len(parts)]) + part,
+        )
+        for index, part in enumerate(parts, 1)
+    ]
 
 
 class EufyBLEController:
@@ -164,25 +252,13 @@ class EufyBLEController:
             raise EufyBLEError("Invalid PKCS#7 padding")
         return data[:-length]
 
-    @staticmethod
-    def _checksum(data: bytes) -> bytes:
-        value = 0
-        for byte in data:
-            value ^= byte
-        return bytes([value])
-
     def _next_seq(self) -> int:
         value = self.seq
         self.seq = 1 if self.seq >= 0xFFFF else self.seq + 1
         return value
 
     def _base_payload(self) -> bytes:
-        return (
-            bytes.fromhex("a104")
-            + struct.pack("<I", int(time.time()))
-            + bytes.fromhex("a228")
-            + self.uid.encode("ascii")
-        )
+        return _envelope(self.uid)
 
     def _packet(
         self,
@@ -192,6 +268,20 @@ class EufyBLEController:
         encrypted: bool = False,
         type_value: int = 1,
     ) -> bytes:
+        return self._packets(
+            opcode, payload, encrypted=encrypted, type_value=type_value
+        )[0]
+
+    def _packets(
+        self,
+        opcode: int,
+        payload: bytes,
+        *,
+        encrypted: bool = False,
+        type_value: int = 1,
+        max_len: int | None = None,
+    ) -> list[bytes]:
+        """Frame a command, as fragments of at most max_len bytes if given."""
         if encrypted:
             if not self.sn or len(self.sn) != 16:
                 raise EufyBLEError(
@@ -201,15 +291,15 @@ class EufyBLEController:
             payload = AES.new(key, AES.MODE_CBC, iv=self.sn).encrypt(self._pad(payload))
             opcode |= 0x4000
 
-        packet = (
-            bytes.fromhex("ff09")
-            + struct.pack("<H", len(payload) + 10)
-            + struct.pack("<H", self._next_seq())
-            + bytes([type_value])
-            + struct.pack(">H", opcode)
-            + payload
-        )
-        return packet + self._checksum(packet)
+        if len(payload) > MAX_ENCRYPTED_LEN:
+            raise EufyFrameTooLarge(
+                f"Command too big for the light ({len(payload)} bytes, "
+                f"at most {MAX_ENCRYPTED_LEN})"
+            )
+        seq = self._next_seq()
+        if max_len is None:
+            return [_frame(seq, type_value, opcode, payload)]
+        return _fragments(seq, type_value, opcode, payload, max_len)
 
     def _on_disconnect(self, _client: BleakClient) -> None:
         self.session_key = None
@@ -310,6 +400,12 @@ class EufyBLEController:
         if self.client is None or not self.client.is_connected:
             raise EufyBLEError("BLE is unavailable")
         await self.client.write_gatt_char(CHAR_WRITE, packet, response=False)
+
+    async def _write_packets(self, packets: list[bytes]) -> None:
+        for index, packet in enumerate(packets):
+            if index:
+                await asyncio.sleep(FRAGMENT_DELAY)
+            await self._write(packet)
 
     async def _disconnect_unlocked(self) -> None:
         client, self.client = self.client, None
@@ -412,6 +508,42 @@ class EufyBLEController:
                 self._status_reply = None
         return self.state
 
+    def _max_write_len(self) -> int:
+        # Links negotiate very different MTUs (185 on macOS, 500 through an
+        # ESPHome proxy); fragments never exceed the app's size, and shrink
+        # further if the link can't carry even that in one write.
+        mtu = getattr(self.client, "mtu_size", None)
+        if isinstance(mtu, int):
+            return min(FRAGMENT_LEN, mtu - ATT_HEADER_LEN)
+        return FRAGMENT_LEN
+
+    async def async_set_power_effect(self, enabled: bool) -> EufyState:
+        """Turn the rainbow sweep the controller plays on power on/off on or off.
+
+        It is a controller setting on 0x0201 (a7: 00 on, 01 off); the light
+        pushes no report for it, so read it back with a status query.
+        """
+        async with self.command_lock:
+            for attempt in range(2):
+                try:
+                    await self.async_ensure_connected()
+                    payload = self._base_payload() + bytes.fromhex("a701") + (
+                        bytes([0x00]) if enabled else bytes([0x01])
+                    )
+                    await self._write(
+                        self._packet(0x0201, payload, encrypted=True, type_value=2)
+                    )
+                    break
+                except EufyBLEError:
+                    await self.async_disconnect()
+                    if attempt == 1:
+                        raise
+                except Exception as exc:
+                    await self.async_disconnect()
+                    if attempt == 1:
+                        raise EufyBLEError(str(exc)) from exc
+        return await self.async_request_status()
+
     async def _send_power(self, is_on: bool, base_payload: bytes) -> None:
         payload = base_payload + bytes.fromhex("a301") + (
             bytes([0x01]) if is_on else bytes([0x00])
@@ -482,6 +614,56 @@ class EufyBLEController:
         await self._write(
             self._packet(0x0206, payload, encrypted=True, type_value=2)
         )
+
+    async def _send_preset(
+        self, opcode: int, tail: bytes, base_payload: bytes
+    ) -> None:
+        # Replay a captured eufy-app preset: the stored tail is everything after
+        # the a1/a2 envelope (a3...b0), so prepend a fresh envelope and frame it
+        # with the preset's own opcode (0x0206 for solids, 0x020D for animations).
+        await self._write_packets(
+            self._packets(
+                opcode,
+                base_payload + tail,
+                encrypted=True,
+                type_value=2,
+                max_len=self._max_write_len(),
+            )
+        )
+
+    async def async_set_preset(
+        self, opcode: int, tail: bytes, brightness: int | None = None
+    ) -> None:
+        # Refuse a preset the light would ignore without an ack before
+        # touching the link, and one too big for it once its MTU is known.
+        size = len(self._pad(self._base_payload() + tail))
+        if size > MAX_ENCRYPTED_LEN:
+            raise EufyFrameTooLarge(
+                f"Preset too big for the light ({size} encrypted bytes, "
+                f"at most {MAX_ENCRYPTED_LEN})"
+            )
+        async with self.command_lock:
+            for attempt in range(2):
+                try:
+                    await self.async_ensure_connected()
+                    _fragments(0, 2, opcode, bytes(size), self._max_write_len())
+                    await self._send_power(True, self._base_payload())
+                    if brightness is not None:
+                        await asyncio.sleep(HANDSHAKE_STEP_DELAY)
+                        await self._send_brightness(brightness, self._base_payload())
+                    await asyncio.sleep(POWER_TO_COLOR_DELAY)
+                    await self._send_preset(opcode, tail, self._base_payload())
+                    return
+                except EufyFrameTooLarge:
+                    raise
+                except EufyBLEError:
+                    await self.async_disconnect()
+                    if attempt == 1:
+                        raise
+                except Exception as exc:
+                    await self.async_disconnect()
+                    if attempt == 1:
+                        raise EufyBLEError(str(exc)) from exc
 
     async def async_set_state(
         self,
