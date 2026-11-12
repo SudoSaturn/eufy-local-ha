@@ -604,3 +604,14 @@ under one's own control (rather than only eufy's) is untested.
 Note: the controller accepts an all-zero user id during the handshake, so
 control does not strictly require a real Eufy account id — which also means
 anyone in BLE range can control the lights.
+
+## E10 spotlights (Outdoor Spotlights E10, T8L20)
+
+Not the E10 string lights (T8L10). The spotlights advertise as `T8L20_XXXX`
+and share the protocol above. Checked on firmware `2.0.3.8`:
+
+- The handshake accepts an all-zero user id.
+- The device-info reply reports the model (`a2`) as `T8L00`, but the serial
+  starts `T8L20`.
+- They have warm and cool white LEDs and take the same RGBWW colour commands
+  as the E22.

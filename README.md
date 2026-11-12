@@ -1,8 +1,8 @@
 # Eufy Local Light for Home Assistant
 
-Local control of Eufy string lights as a native Home Assistant light entity: power, brightness, RGB, warm/cool white, and the app's own preset effects over an encrypted Bluetooth Low Energy (BLE) session.
+Local control of Eufy string lights and spotlights as a native Home Assistant light entity: power, brightness, RGB, warm/cool white, and the app's own preset effects over an encrypted Bluetooth Low Energy (BLE) session.
 
-> This is an unofficial community integration built by reverse-engineering the Eufy app's BLE traffic. It is not affiliated with or endorsed by Anker/Eufy. It was developed and tested against the Eufy Outdoor String Lights E10 (model T8L10) and the Eufy Permanent Outdoor Lights E22 (model T8L02). Other lights may work but are untested.
+> This is an unofficial community integration built by reverse-engineering the Eufy app's BLE traffic. It is not affiliated with or endorsed by Anker/Eufy. It was developed and tested against the Eufy Outdoor String Lights E10 (model T8L10), the Eufy Permanent Outdoor Lights E22 (model T8L02) and the Eufy Outdoor Spotlights E10 (model T8L20). Other lights may work but are untested.
 
 ### But first!
 
